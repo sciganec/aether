@@ -130,6 +130,7 @@ class DynamicBoardEngine {
     this.season = 0;
     this.transpositionTable = new Map();
     this.error = null;
+    this.history = [];
     this.reset();
   }
 
@@ -200,6 +201,9 @@ class DynamicBoardEngine {
 
   makeMove(fr, fc, tr, tc) {
     if (this.winner !== null) return false;
+
+    // Save state before move
+    this.history.push(this.saveState());
 
     const fromVal = this._getCellRaw(fr, fc);
     if (fromVal === 0) return false;
@@ -580,7 +584,37 @@ class DynamicBoardEngine {
     this.season = Math.floor(Math.random() * 4);
     this.transpositionTable.clear();
     this.error = null;
+    this.history = [];
     logger.add('INFO', `Гру скинуто (розмір ${this.size}x${this.size})`);
+  }
+
+  saveState() {
+    return {
+      board: new Uint8Array(this.board),
+      hash: this.hash,
+      currentPlayer: this.currentPlayer,
+      winner: this.winner,
+      moveCount: this.moveCount,
+      season: this.season
+    };
+  }
+
+  restoreState(state) {
+    this.board = new Uint8Array(state.board);
+    this.hash = state.hash;
+    this.currentPlayer = state.currentPlayer;
+    this.winner = state.winner;
+    this.moveCount = state.moveCount;
+    this.season = state.season;
+    this.error = null;
+  }
+
+  undo() {
+    if (this.history.length === 0) return false;
+    const previousState = this.history.pop();
+    this.restoreState(previousState);
+    logger.add('UNDO', 'Останній хід скасовано');
+    return true;
   }
 
   clone() {
@@ -598,6 +632,7 @@ class DynamicBoardEngine {
     c.season = this.season;
     c.transpositionTable = this.transpositionTable;
     c.error = this.error;
+    c.history = [...this.history];
     return c;
   }
 }
@@ -670,6 +705,11 @@ function useEngine(size = 4) {
     return engineRef.current.getAIMove(level);
   }, []);
 
+  const undo = useCallback(() => {
+    engineRef.current.undo();
+    refresh();
+  }, [refresh]);
+
   return {
     ...state,
     engine: engineRef.current, // Expose engine for advanced features
@@ -677,6 +717,7 @@ function useEngine(size = 4) {
     resetGame,
     getAIMove,
     refresh,
+    undo,
   };
 }
 
@@ -706,16 +747,10 @@ const Cell = React.memo(({ r, c, value, isSelected, isValid, onClick, onDragStar
 
 const Board = ({ board, selected, validMoves, hint, onCellClick, onDragStart, onDragOver, onDrop }) => {
   const size = board.length;
-  // Dynamically set grid templates and cell sizes based on board size
-  const gridStyle = {
-    gridTemplateColumns: `repeat(${size}, ${size === 6 ? '70px' : '110px'})`,
-    gridTemplateRows: `repeat(${size}, ${size === 6 ? '70px' : '110px'})`,
-    gap: size === 6 ? '8px' : '15px'
-  };
 
   return (
     <div className="board-container">
-      <div className="board" style={gridStyle}>
+      <div className="board" style={{ '--board-size': size }}>
         {board.map((row, r) => 
           row.map((cell, c) => {
             const isSelected = selected?.r === r && selected?.c === c;
@@ -879,6 +914,24 @@ const LogPanel = ({ logText, onCopy, onClear }) => {
   );
 };
 
+// ------------------ RULES MODAL ------------------
+const RulesModal = ({ onClose }) => {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content glass-panel" onClick={e => e.stopPropagation()}>
+        <h2>📜 Правила Гри</h2>
+        <div style={{ textAlign: 'left', marginTop: '15px', lineHeight: '1.6' }}>
+          <p><strong>1. Мета гри:</strong> Зібрати всі 4 стихії (🔥💧🌍💨) в одній фігурі.</p>
+          <p><strong>2. Як ходити:</strong> Фігури ходять як кінь у шахах (буквою «Г»).</p>
+          <p><strong>3. Злиття:</strong> При стрибку на іншу фігуру їхні стихії об'єднуються.</p>
+          <p><strong>4. Перемога:</strong> Перемагає той, хто першим створить Квінтесенцію (всі 4 стихії разом).</p>
+        </div>
+        <button className="action-btn" style={{marginTop: '25px', width: '100%'}} onClick={onClose}>Зрозуміло</button>
+      </div>
+    </div>
+  );
+};
+
 // ------------------ ГОЛОВНИЙ КОМПОНЕНТ ------------------
 function App() {
   const [boardSize, setBoardSize] = useState(4);
@@ -903,26 +956,24 @@ function App() {
   const [validMoves, setValidMoves] = useState([]);
   const [aiThinking, setAiThinking] = useState(false);
   const [logText, setLogText] = useState('');
-  const [history, setHistory] = useState([]);
   const [hint, setHint] = useState(null);
+  const [showRules, setShowRules] = useState(false);
 
   const isThinkingRef = useRef(false);
 
-  // Undo/Redo Logic
-  const saveToHistory = useCallback(() => {
-    setHistory(prev => [...prev.slice(-19), engine.board]);
-  }, [engine]);
-
-  const undoMove = useCallback(() => {
-    if (history.length === 0) return;
-    const prevBoard = history[history.length - 1];
-    engine.board = prevBoard;
-    // Recalculate hash and other state (simplified for demo, in real app more state needed)
-    engine.moveCount = Math.max(0, engine.moveCount - 1);
-    engine.currentPlayer = engine.currentPlayer === 0 ? 1 : 0;
-    setHistory(prev => prev.slice(0, -1));
+  const handleUndo = useCallback(() => {
+    if (engine.history.length === 0) return;
+    
+    if (gameMode === 'vsAI' && engine.history.length >= 2 && currentPlayer === 0) {
+      engine.undo();
+      engine.undo();
+    } else {
+      engine.undo();
+    }
     refresh();
-  }, [engine, history, refresh]);
+    setSelected(null);
+    setValidMoves([]);
+  }, [engine, refresh, gameMode, currentPlayer]);
 
   const getHint = useCallback(() => {
     if (isThinkingRef.current) return;
@@ -970,12 +1021,11 @@ function App() {
         return;
       }
 
-      saveToHistory();
       makeMove(selected.r, selected.c, r, c);
       setSelected(null);
       setValidMoves([]);
     },
-    [board, selected, validMoves, winner, gameMode, currentPlayer, makeMove, saveToHistory, engine.targets]
+    [board, selected, validMoves, winner, gameMode, currentPlayer, makeMove, engine.targets]
   );
 
   const onDragStart = (e, r, c) => {
@@ -995,7 +1045,6 @@ function App() {
     
     const isValid = engine.targets[fr][fc].some(([nr, nc]) => nr === tr && nc === tc);
     if (isValid) {
-      saveToHistory();
       makeMove(fr, fc, tr, tc);
     }
     setSelected(null);
@@ -1079,7 +1128,6 @@ function App() {
     // useEngine hook will automatically create a new engine, but we should reset state
     setSelected(null);
     setValidMoves([]);
-    setHistory([]);
     setAiThinking(false);
     isThinkingRef.current = false;
   }, []);
@@ -1103,6 +1151,8 @@ function App() {
 
   return (
     <div className="aether-game">
+      {showRules && <RulesModal onClose={() => setShowRules(false)} />}
+      
       <h1>⚡ AETHER PROFESSIONAL ⚡</h1>
       <div className="subtitle">Стабільний двигун з класичним дизайном</div>
 
@@ -1111,8 +1161,9 @@ function App() {
       <div className="game-layout">
         {/* Left Side: Game Board */}
         <div className="board-container" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-          <div className="action-buttons" style={{ display: 'flex', justifyContent: 'center', gap: '15px', marginBottom: '20px' }}>
-            <button className="action-btn" onClick={undoMove} disabled={history.length === 0}>🔙 Відміна</button>
+          <div className="action-buttons" style={{ display: 'flex', justifyContent: 'center', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
+            <button className="action-btn" onClick={() => setShowRules(true)}>ℹ️ Правила</button>
+            <button className="action-btn" onClick={handleUndo} disabled={engine.history.length === 0}>🔙 Відміна</button>
             <button className="action-btn" onClick={getHint} disabled={winner !== null || aiThinking}>💡 Підказка</button>
           </div>
 

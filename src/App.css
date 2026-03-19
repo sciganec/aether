@@ -94,6 +94,8 @@ h1 {
   display: flex;
   justify-content: center;
   flex-direction: column;
+  width: 100%;
+  max-width: min(90vw, 650px);
 }
 
 .side-panel {
@@ -194,14 +196,16 @@ h1 {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(4, 110px);
-  grid-template-rows: repeat(4, 110px);
-  gap: 15px;
-  padding: 24px;
+  grid-template-columns: repeat(var(--board-size, 4), 1fr);
+  grid-template-rows: repeat(var(--board-size, 4), 1fr);
+  gap: clamp(4px, 1.5vw, 15px);
+  padding: clamp(12px, 3vw, 24px);
   background: rgba(255, 255, 255, 0.02);
-  border-radius: 36px;
+  border-radius: clamp(16px, 4vw, 36px);
   border: 1px solid var(--glass-border);
   box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+  width: 100%;
+  aspect-ratio: 1 / 1;
 }
 
 .cell {
@@ -382,16 +386,37 @@ h1 {
 }
 
 @media (max-width: 600px) {
-  .aether-game { padding: 20px; }
-  .board {
-    grid-template-columns: repeat(4, 75px);
-    grid-template-rows: repeat(4, 75px);
-    gap: 10px;
-  }
+  .aether-game { padding: 15px; }
+  .action-buttons { flex-direction: row; flex-wrap: wrap; }
   .element { 
-    /* Slightly smaller for mobile, but still fixed */
-    font-size: 1.8rem; 
+    font-size: clamp(1.2rem, 5vw, 2rem); 
   }
-  .count-1 .element { font-size: 2.2rem; }
-  h1 { font-size: 2rem; }
+  .count-1 .element { font-size: clamp(1.5rem, 6.5vw, 2.5rem); }
+  h1 { font-size: 2.2rem; }
 }
+
+/* --- MODAL RULES --- */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.modal-content {
+  background: var(--glass-bg);
+  padding: 30px;
+  border-radius: 24px;
+  border: 1px solid var(--primary-gold);
+  max-width: 450px;
+  width: 100%;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+  font-size: 1.1rem;
+}
+.modal-content p { margin-bottom: 15px; }
