@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/aether/static/css/main.34ae478d.css",
+    "main.js": "/aether/static/js/main.bd5ccb0f.js",
+    "index.html": "/aether/index.html",
+    "main.34ae478d.css.map": "/aether/static/css/main.34ae478d.css.map",
+    "main.bd5ccb0f.js.map": "/aether/static/js/main.bd5ccb0f.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.34ae478d.css",
+    "static/js/main.bd5ccb0f.js"
+  ]
+}
