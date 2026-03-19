@@ -787,27 +787,10 @@ const ControlPanel = ({
   setFirstPlayer,
   boardSize,
   setBoardSize,
-  onReset,
   winner,
   currentPlayer,
   moveCount,
 }) => {
-  const difficultyName = {
-    easy: 'Легкий',
-    medium: 'Середній',
-    hard: 'Складний',
-    expert: 'Експерт',
-    master: 'Master',
-    impossible: 'Impossible',
-    subit: 'SUBIT',
-  };
-
-  const cycleDifficulty = () => {
-    const levels = ['easy', 'medium', 'hard', 'expert', 'master', 'impossible', 'subit'];
-    const next = (levels.indexOf(aiDifficulty) + 1) % levels.length;
-    setAiDifficulty(levels[next]);
-  };
-
   return (
     <div className="control-panel">
       <div className="game-status">
@@ -821,58 +804,50 @@ const ControlPanel = ({
         <div className="badge move-counter">Хід #{moveCount + 1}</div>
       </div>
 
-      <div className="mode-selector">
-        <button
-          className={gameMode === 'twoPlayer' ? 'active' : ''}
-          onClick={() => setGameMode('twoPlayer')}
-        >
-          👥 2 гравці
-        </button>
-        <button
-          className={gameMode === 'vsAI' ? 'active' : ''}
-          onClick={() => setGameMode('vsAI')}
-        >
-          🤖 Проти ШІ
-        </button>
-        {gameMode === 'vsAI' && (
-          <button className="difficulty-btn" onClick={cycleDifficulty}>
-            🧠 {difficultyName[aiDifficulty]}
-          </button>
-        )}
-      </div>
-      
-      <div className="mode-selector">
-        <button
-          className={boardSize === 4 ? 'active' : ''}
-          onClick={() => setBoardSize(4)}
-        >
-          🔲 4x4
-        </button>
-        <button
-          className={boardSize === 6 ? 'active' : ''}
-          onClick={() => setBoardSize(6)}
-        >
-          🔳 6x6
-        </button>
-        <button onClick={onReset}>🔄 Нова гра</button>
+      <div className="settings-section" style={{ marginTop: '20px' }}>
+        <h4 style={{ marginBottom: '10px', color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', textTransform: 'uppercase' }}>Режим гри</h4>
+        <div className="toggle-group">
+          <button className={gameMode === 'twoPlayer' ? 'active' : ''} onClick={() => setGameMode('twoPlayer')}>👥 2 гравці</button>
+          <button className={gameMode === 'vsAI' ? 'active' : ''} onClick={() => setGameMode('vsAI')}>🤖 Проти ШІ</button>
+        </div>
       </div>
 
       {gameMode === 'vsAI' && (
-        <div className="first-player-selector">
-          <button
-            className={firstPlayer === 0 ? 'active' : ''}
-            onClick={() => setFirstPlayer(0)}
-          >
-            👤 Людина починає
-          </button>
-          <button
-            className={firstPlayer === 1 ? 'active' : ''}
-            onClick={() => setFirstPlayer(1)}
-          >
-            🤖 ШІ починає
-          </button>
-        </div>
+        <>
+          <div className="settings-section" style={{ marginTop: '15px' }}>
+            <h4 style={{ marginBottom: '10px', color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', textTransform: 'uppercase' }}>Складність ШІ</h4>
+            <select 
+              value={aiDifficulty} 
+              onChange={(e) => setAiDifficulty(e.target.value)}
+              className="styled-select"
+            >
+              <option value="easy">🟩 Легкий</option>
+              <option value="medium">🟨 Середній</option>
+              <option value="hard">🟧 Складний</option>
+              <option value="expert">🟥 Експерт</option>
+              <option value="master">🟪 Майстер</option>
+              <option value="impossible">⬛ Неможливий</option>
+              <option value="subit">💀 SUBIT</option>
+            </select>
+          </div>
+
+          <div className="settings-section" style={{ marginTop: '15px' }}>
+            <h4 style={{ marginBottom: '10px', color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', textTransform: 'uppercase' }}>Хто починає?</h4>
+            <div className="toggle-group">
+              <button className={firstPlayer === 0 ? 'active' : ''} onClick={() => setFirstPlayer(0)}>👤 Людина</button>
+              <button className={firstPlayer === 1 ? 'active' : ''} onClick={() => setFirstPlayer(1)}>🤖 ШІ</button>
+            </div>
+          </div>
+        </>
       )}
+
+      <div className="settings-section" style={{ marginTop: '15px' }}>
+        <h4 style={{ marginBottom: '10px', color: 'rgba(255,255,255,0.7)', fontSize: '0.9rem', textTransform: 'uppercase' }}>Розмір дошки</h4>
+        <div className="toggle-group">
+          <button className={boardSize === 4 ? 'active' : ''} onClick={() => setBoardSize(4)}>🔲 4x4</button>
+          <button className={boardSize === 6 ? 'active' : ''} onClick={() => setBoardSize(6)}>🔳 6x6</button>
+        </div>
+      </div>
     </div>
   );
 };
@@ -1161,10 +1136,15 @@ function App() {
       <div className="game-layout">
         {/* Left Side: Game Board */}
         <div className="board-container" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-          <div className="action-buttons" style={{ display: 'flex', justifyContent: 'center', gap: '10px', marginBottom: '20px', flexWrap: 'wrap' }}>
-            <button className="action-btn" onClick={() => setShowRules(true)}>ℹ️ Правила</button>
+          <div className="action-buttons" style={{ display: 'flex', justifyContent: 'center', gap: '8px', marginBottom: '20px', flexWrap: 'wrap', width: '100%' }}>
+            <button className="action-btn primary-action" onClick={handleReset}>🔄 Нова гра</button>
             <button className="action-btn" onClick={handleUndo} disabled={engine.history.length === 0}>🔙 Відміна</button>
             <button className="action-btn" onClick={getHint} disabled={winner !== null || aiThinking}>💡 Підказка</button>
+            <button className="action-btn" onClick={() => setShowRules(true)}>ℹ️ Правила</button>
+          </div>
+
+          <div style={{ color: 'rgba(255,255,255,0.5)', marginBottom: '15px', fontSize: '0.95rem', textAlign: 'center' }}>
+            👆 Натисніть на фігуру, а потім на клітинку, щоб зробити хід
           </div>
 
           <Board
@@ -1197,7 +1177,6 @@ function App() {
             setFirstPlayer={handleSetFirstPlayer}
             boardSize={boardSize}
             setBoardSize={handleSetBoardSize}
-            onReset={handleReset}
             winner={winner}
             currentPlayer={currentPlayer}
             moveCount={moveCount}
