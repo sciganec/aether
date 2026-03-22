@@ -1,801 +1,802 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import './App.css';
+import React,{useEffect,useRef,useState,useCallback}from'react';
+import'./App.css';
 
-// ------------------ CONSTANTS ------------------
-const ELEMENTS = ['🔥', '💧', '🌍', '💨', '✨', '⚡', '❄️', '🌿'];
-const ELEMENT_NAMES = ['Вогонь', 'Вода', 'Земля', 'Повітря', 'Ефір', 'Блискавка', 'Лід', 'Природа'];
-
-const ELEMENT_COLORS_HSL = [
-  [10, 90, 60],   // Fire - warm red-orange
-  [200, 80, 60],  // Water - deep blue
-  [30, 70, 45],   // Earth - brown
-  [180, 60, 65],  // Air - cyan
-  [260, 75, 70],  // Aether - violet
-  [50, 100, 60],  // Lightning - yellow
-  [195, 90, 75],  // Ice - light blue
-  [130, 65, 50],  // Nature - green
+const EL=['🔥','💧','🌍','💨','✨','⚡','❄️','🌿'];
+const EN_ELEM=['Fire','Water','Earth','Air','Aether','Lightning','Ice','Nature'];
+// Perceptually-distinct palette for dark background.
+// Based on ColorBrewer Dark2 hue positions, reordered for best n=3..8 subsets,
+// with L and S varied to compensate for close hue pairs (Tableau Paired technique).
+// n=3: 95° min gap (orange / blue / green — maximally distinct)
+// n=4..6: 43°+ min gap — all clearly different
+// n=7..8: 28° hue gap but ΔL=14% ΔS=28% (vivid orange vs pale rose — very different)
+// [hue, saturation%, lightness%]
+// 8 perceptually distinct colors — no two look similar.
+// orange / blue / green / yellow / violet / teal / light-pink / indigo
+// Close hue pairs differ in lightness: orange L=62 vs yellow L=72, teal L=55 vs indigo L=56→more sat
+const ELC=[
+  [ 12, 96, 62],  // 🔥 orange-red   — fire        vivid L=62
+  [213, 88, 66],  // 💧 sky blue     — water
+  [130, 68, 50],  // 🌍 forest green — earth        dark
+  [ 52, 98, 72],  // 💨 yellow       — air          bright L=72
+  [292, 80, 62],  // ✨ violet       — aether
+  [176, 84, 55],  // ⚡ teal-cyan    — lightning
+  [330, 75, 80],  // ❄️ light pink   — ice          very light L=80
+  [248, 78, 56],  // 🌿 indigo       — nature        deep L=56
 ];
+const PC=['#4f8ef7','#f05252'];
+const EMPTY=255;
+const KN=[[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+const elc=n=>ELC.slice(0,n).map(([h,s,l])=>`hsl(${h},${s}%,${l}%)`);
+const pad2=n=>String(n).padStart(2,'0');
+const fmtT=s=>`${pad2(Math.floor(s/60))}:${pad2(s%60)}`;
+const coord=(r,c)=>String.fromCharCode(65+c)+(r+1);
 
-const getElementColors = (count) =>
-  ELEMENT_COLORS_HSL.slice(0, count).map(([h, s, l]) => `hsl(${h}, ${s}%, ${l}%)`);
+// ── AUDIO ─────────────────────────────────────────
+class SFX{
+  constructor(){this._ctx=null}
+  _ac(){try{return this._ctx||(this._ctx=new(window.AudioContext||window.webkitAudioContext)())}catch{return null}}
+  _t(f,tp,d,v=.13,dl=0){
+    const c=this._ac();if(!c)return;
+    try{const o=c.createOscillator(),g=c.createGain();
+      o.connect(g);g.connect(c.destination);o.type=tp;o.frequency.value=f;
+      g.gain.setValueAtTime(v,c.currentTime+dl);
+      g.gain.exponentialRampToValueAtTime(.001,c.currentTime+dl+d);
+      o.start(c.currentTime+dl);o.stop(c.currentTime+dl+d)}catch{}}
+  select(){this._t(440,'sine',.1,.1)}
+  move(){this._t(330,'sine',.07,.1);this._t(495,'sine',.09,.08,.06)}
+  merge(){[220,330,440,550].forEach((f,i)=>this._t(f,'triangle',.14,.11,i*.05))}
+  capture(){this._t(150,'sawtooth',.07,.13);this._t(260,'sawtooth',.1,.1,.06);this._t(400,'sine',.12,.08,.13)}
+  win(){[523,659,784,1047].forEach((f,i)=>this._t(f,'sine',.3,.14,i*.11))}
+  undo(){this._t(220,'sawtooth',.08,.08)}
+}
+const sfx=new SFX();
 
-const KNIGHT_MOVES = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+// ── ENGINE HELPERS ────────────────────────────────
+function mkTargets(sz){
+  const w=v=>(v+sz)%sz;
+  return Array(sz).fill(0).map((_,r)=>Array(sz).fill(0).map((_,c)=>{
+    const seen=new Set();
+    return KN.map(([dr,dc])=>[w(r+dr),w(c+dc)]).filter(([tr,tc])=>{
+      const k=tr*sz+tc;if(seen.has(k))return false;seen.add(k);return true;
+    });
+  }));
+}
+const bts=(v,n)=>{let k=0;for(let i=0;i<n;i++)if(v&(1<<i))k++;return k};
 
-// ------------------ AUDIO ENGINE ------------------
-class AudioEngine {
-  constructor() {
-    this.ctx = null;
+function mkNeutral(sz,n){
+  const b=new Uint8Array(sz*sz);
+  for(let r=0;r<sz;r++)for(let c=0;c<sz;c++)b[r*sz+c]=1<<((r+c)%n);
+  return{board:b,owner:new Uint8Array(sz*sz).fill(EMPTY)};
+}
+function mkOwned(sz,n){
+  const b=new Uint8Array(sz*sz),o=new Uint8Array(sz*sz).fill(EMPTY);
+  const half=Math.floor(sz/2),mid=Math.floor(sz/2);
+  for(let r=0;r<sz;r++)for(let c=0;c<sz;c++){
+    const i=r*sz+c;
+    if(sz%2===1&&r===mid&&c===mid)continue;
+    if(r<half){b[i]=1<<(c%n);o[i]=1;}
+    else if(r>=sz-half){b[i]=1<<(c%n);o[i]=0;}
+    else if(sz%2===1&&r===mid){const el=Math.min(c,sz-1-c)%n;b[i]=1<<el;o[i]=(c<mid)?1:0;}
   }
-  _ensure() {
-    if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-    return this.ctx;
-  }
-  _tone(freq, type, dur, vol = 0.15, delay = 0) {
-    try {
-      const ctx = this._ensure();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain); gain.connect(ctx.destination);
-      osc.type = type; osc.frequency.value = freq;
-      gain.gain.setValueAtTime(vol, ctx.currentTime + delay);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + dur);
-      osc.start(ctx.currentTime + delay);
-      osc.stop(ctx.currentTime + delay + dur);
-    } catch {}
-  }
-  select() { this._tone(440, 'sine', 0.1, 0.1); }
-  move() {
-    this._tone(330, 'sine', 0.08, 0.1);
-    this._tone(495, 'sine', 0.1, 0.08, 0.07);
-  }
-  merge() {
-    [220, 330, 440, 550].forEach((f, i) => this._tone(f, 'triangle', 0.15, 0.12, i * 0.05));
-  }
-  win() {
-    [523, 659, 784, 1047].forEach((f, i) => this._tone(f, 'sine', 0.3, 0.15, i * 0.12));
-  }
-  undo() { this._tone(220, 'sawtooth', 0.08, 0.08); }
+  return{board:b,owner:o};
 }
 
-const audio = new AudioEngine();
+// ── ZOBRIST ───────────────────────────────────────
+const ZOB=(()=>{
+  const r64=()=>{
+    const h=BigInt(Math.floor(Math.random()*0xFFFFFFFF));
+    const l=BigInt(Math.floor(Math.random()*0xFFFFFFFF));
+    return(h<<32n)|l;
+  };
+  return{t:Array(64).fill(0).map(()=>Array(256).fill(0).map(()=>[r64(),r64(),r64()])),side:r64()};
+})();
 
-// ------------------ ENGINE HELPERS ------------------
-function generateKnightMoveTargets(size) {
-  const wrap = (v) => (v + size) % size;
-  return Array(size).fill().map((_, r) =>
-    Array(size).fill().map((_, c) =>
-      KNIGHT_MOVES.map(([dr, dc]) => [wrap(r + dr), wrap(c + dc)])
-    )
-  );
-}
+// ── AI PARAMS ─────────────────────────────────────
+const AI_DEPTH={
+  owned:{
+    3:{easy:1,medium:2,hard:3,expert:4,impossible:5},
+    4:{easy:1,medium:2,hard:3,expert:3,impossible:4},
+    5:{easy:1,medium:2,hard:2,expert:3,impossible:3},
+    6:{easy:1,medium:1,hard:2,expert:2,impossible:3},
+    7:{easy:1,medium:1,hard:2,expert:2,impossible:2},
+    8:{easy:1,medium:1,hard:1,expert:2,impossible:2},
+  },
+  neutral:{
+    3:{easy:1,medium:2,hard:3,expert:4,impossible:5},
+    4:{easy:1,medium:2,hard:3,expert:4,impossible:5},
+    5:{easy:1,medium:2,hard:3,expert:3,impossible:4},
+    6:{easy:1,medium:2,hard:3,expert:3,impossible:4},
+    7:{easy:1,medium:2,hard:2,expert:3,impossible:3},
+    8:{easy:1,medium:2,hard:2,expert:3,impossible:3},
+  },
+};
+const NODE_LIMIT={3:200000,4:80000,5:40000,6:30000,7:20000,8:15000};
+const TIME_LIMIT_MS=600;
 
-function generateStartingBoard(size, numElements) {
-  const board = new Uint8Array(size * size);
-  for (let r = 0; r < size; r++)
-    for (let c = 0; c < size; c++)
-      board[r * size + c] = 1 << ((r + c) % numElements);
-  return board;
-}
-
-// ------------------ ZOBRIST ------------------
-class Zobrist {
-  constructor(maxSize = 8) {
-    this.table = Array(maxSize * maxSize).fill().map(() => Array(256).fill(0n));
-    this.sideToMove = 0n;
-    this.init(maxSize);
-  }
-  random64() {
-    const high = BigInt(Math.floor(Math.random() * 0xFFFFFFFF));
-    const low = BigInt(Math.floor(Math.random() * 0xFFFFFFFF));
-    return (high << 32n) | low;
-  }
-  init(maxSize) {
-    for (let i = 0; i < maxSize * maxSize; i++)
-      for (let j = 0; j < 256; j++) this.table[i][j] = this.random64();
-    this.sideToMove = this.random64();
-  }
-}
-const zobrist = new Zobrist(8);
-
-// ------------------ BOARD ENGINE ------------------
-class DynamicBoardEngine {
-  constructor(size = 5, numElements = 5) {
-    this.size = size;
-    this.numElements = numElements;
-    this.winMask = (1 << numElements) - 1;
-    this.targets = generateKnightMoveTargets(size);
-    this.board = new Uint8Array(size * size);
-    this.hash = 0n;
-    this.currentPlayer = 0;
-    this.winner = null;
-    this.moveCount = 0;
-    this.searchNodes = 0;
-    this.transpositionTable = new Map();
-    this.history = [];
+// ── ENGINE ────────────────────────────────────────
+class Engine{
+  constructor(sz=5,n=5,owned=false){
+    this.sz=sz;this.n=n;this.owned=owned;
+    this.win=(1<<n)-1;this.tg=mkTargets(sz);
+    this.board=new Uint8Array(sz*sz);this.owner=new Uint8Array(sz*sz).fill(EMPTY);
+    this.hash=0n;this.cp=0;this.winner=null;this.wr=null;
+    this.mc=0;this.nodes=0;this.tt=new Map();this.hist=[];
     this.reset();
   }
-
-  _idx(r, c) { return r * this.size + c; }
-  _getCellRaw(r, c) { return this.board[this._idx(r, c)]; }
-  _setCellRaw(r, c, val) { this.board[this._idx(r, c)] = val; }
-
-  countElements(r, c) {
-    const val = this._getCellRaw(r, c);
-    let count = 0;
-    for (let i = 0; i < this.numElements; i++) if (val & (1 << i)) count++;
-    return count;
+  _i(r,c){return r*this.sz+c}
+  _v(r,c){return this.board[this._i(r,c)]}
+  _o(r,c){return this.owner[this._i(r,c)]}
+  counts(){
+    let a=0,b=0;
+    for(let i=0;i<this.sz*this.sz;i++){if(this.owner[i]===0)a++;else if(this.owner[i]===1)b++}
+    return[a,b];
   }
-
-  getAllMoves() {
-    const moves = [];
-    for (let r = 0; r < this.size; r++)
-      for (let c = 0; c < this.size; c++) {
-        if (this._getCellRaw(r, c) === 0) continue;
-        for (const [tr, tc] of this.targets[r][c]) moves.push({ from: [r, c], to: [tr, tc] });
+  moves(){
+    const m=[];
+    for(let r=0;r<this.sz;r++)for(let c=0;c<this.sz;c++){
+      const i=this._i(r,c);if(!this.board[i])continue;
+      if(this.owned&&this.owner[i]!==this.cp)continue;
+      for(const t of this.tg[r][c])m.push({from:[r,c],to:t});
+    }
+    return m;
+  }
+  winMoves(){
+    const w=[];
+    for(let r=0;r<this.sz;r++)for(let c=0;c<this.sz;c++){
+      const i=this._i(r,c);if(!this.board[i])continue;
+      if(this.owned&&this.owner[i]!==this.cp)continue;
+      const v=this.board[i];
+      for(const[tr,tc]of this.tg[r][c])
+        if((v|this.board[this._i(tr,tc)])===this.win)w.push({from:[r,c],to:[tr,tc]});
+    }
+    return w;
+  }
+  threatMap(){
+    const s=new Set();
+    this.winMoves().forEach(m=>{s.add(`${m.from[0]},${m.from[1]}`);s.add(`${m.to[0]},${m.to[1]}`)});
+    return s;
+  }
+  capThreat(){
+    if(!this.owned)return new Set();
+    const s=new Set(),op=1-this.cp;
+    for(let r=0;r<this.sz;r++)for(let c=0;c<this.sz;c++){
+      if(this.owner[this._i(r,c)]!==op)continue;
+      for(const[tr,tc]of this.tg[r][c])
+        if(this.owner[this._i(tr,tc)]===this.cp)s.add(`${tr},${tc}`);
+    }
+    return s;
+  }
+  _xor(r,c){const i=this._i(r,c),v=this.board[i],o=this.owner[i];if(v)this.hash^=ZOB.t[i<64?i:63][v&255][o===EMPTY?2:o]}
+  snap(){return{board:new Uint8Array(this.board),owner:new Uint8Array(this.owner),cp:this.cp,winner:this.winner,wr:this.wr,mc:this.mc,hash:this.hash}}
+  load(s){this.board=new Uint8Array(s.board);this.owner=new Uint8Array(s.owner);this.cp=s.cp;this.winner=s.winner;this.wr=s.wr;this.mc=s.mc;this.hash=s.hash;this.tt.clear()}
+  move(fr,fc,tr,tc){
+    if(this.winner!=null)return{won:false,captured:false};
+    const player=this.cp;this.hist.push(this.snap());
+    const fi=this._i(fr,fc),ti=this._i(tr,tc);
+    const fv=this.board[fi],tv=this.board[ti],to=this.owner[ti];
+    this._xor(fr,fc);this._xor(tr,tc);
+    const captured=this.owned&&to!==EMPTY&&to!==this.cp;
+    const nv=fv|tv;
+    this.board[fi]=0;this.owner[fi]=EMPTY;
+    this.board[ti]=nv;this.owner[ti]=this.owned?this.cp:EMPTY;
+    this._xor(tr,tc);this.mc++;this.hash^=ZOB.side;
+    if(nv===this.win){this.winner=player;this.wr='elements';return{won:true,captured,player}}
+    if(this.owned){
+      const[a,b]=this.counts();
+      if((player===0?b:a)===0){this.winner=player;this.wr='annihilation';return{won:true,captured,player}}
+    }
+    this.cp=1-this.cp;return{won:false,captured,player};
+  }
+  eval(){
+    const pv=[0,60,600,4000,18000,90000,450000,2200000],mid=(this.sz-1)/2,wm=this.win;
+    let sc=0;
+    for(let r=0;r<this.sz;r++)for(let c=0;c<this.sz;c++){
+      const i=this._i(r,c),v=this.board[i],o=this.owner[i];if(!v)continue;
+      const cnt=bts(v,this.n),base=pv[cnt]+(this.sz-Math.abs(r-mid)-Math.abs(c-mid))*8;
+      const sign=this.owned?(o===this.cp?1:-1):1;
+      for(const[tr,tc]of this.tg[r][c]){
+        const tv=this.board[this._i(tr,tc)],nv2=v|tv;
+        if(nv2===wm)sc+=sign*120000;
+        else if(bts(nv2,this.n)===this.n-1)sc+=sign*25000;
+        if(this.owned&&this.owner[this._i(tr,tc)]===o&&v!==tv)sc+=sign*cnt*40;
       }
-    return moves;
+      sc+=sign*base;
+    }
+    if(this.owned){const[a,b]=this.counts();sc+=((this.cp===0?a:b)-(this.cp===0?b:a))*55}
+    return sc;
   }
-
-  // NEW: Find cells one merge away from winning
-  getWinningMoves() {
-    const winning = [];
-    for (let r = 0; r < this.size; r++)
-      for (let c = 0; c < this.size; c++) {
-        const val = this._getCellRaw(r, c);
-        if (val === 0) continue;
-        for (const [tr, tc] of this.targets[r][c]) {
-          const merged = val | this._getCellRaw(tr, tc);
-          if (merged === this.winMask) winning.push({ from: [r, c], to: [tr, tc] });
-        }
-      }
-    return winning;
-  }
-
-  // NEW: Get threat map - cells that are one move away from winning
-  getThreatMap() {
-    const threats = new Set();
-    const winning = this.getWinningMoves();
-    winning.forEach(m => {
-      threats.add(`${m.from[0]},${m.from[1]}`);
-      threats.add(`${m.to[0]},${m.to[1]}`);
+  minimax(d,a,b,mx,lim,nl){
+    this.nodes++;
+    if(this.winner!=null)return mx?-9999999:9999999;
+    if(!d||Date.now()>lim||this.nodes>nl)return this.eval();
+    const key=`${this.hash}:${d}`;
+    const cv=this.tt.get(key);if(cv!=null)return cv;
+    const ms=this.moves();if(!ms.length)return this.eval();
+    ms.sort((x,y)=>{
+      const sc=m=>{
+        const tv=this._v(m.to[0],m.to[1]),fv=this._v(m.from[0],m.from[1]);
+        return((fv|tv)===this.win?100000:0)
+          +(this.owned&&this._o(m.to[0],m.to[1])!==EMPTY&&this._o(m.to[0],m.to[1])!==this.cp?3000:0)
+          +bts(tv,this.n)*10+bts(fv,this.n)*5;
+      };
+      return sc(y)-sc(x);
     });
-    return threats;
-  }
-
-  _updateHash(r, c, val) {
-    const idx = r * this.size + c;
-    const oldVal = this._getCellRaw(r, c);
-    if (oldVal !== 0) this.hash ^= zobrist.table[idx][oldVal];
-    if (val !== 0) this.hash ^= zobrist.table[idx][val];
-  }
-
-  saveState() {
-    return {
-      board: new Uint8Array(this.board),
-      currentPlayer: this.currentPlayer,
-      winner: this.winner,
-      moveCount: this.moveCount,
-      hash: this.hash
-    };
-  }
-
-  loadState(s) {
-    this.board = new Uint8Array(s.board);
-    this.currentPlayer = s.currentPlayer;
-    this.winner = s.winner;
-    this.moveCount = s.moveCount;
-    this.hash = s.hash;
-    this.transpositionTable.clear();
-  }
-
-  makeMove(fr, fc, tr, tc) {
-    if (this.winner !== null) return false;
-    this.history.push(this.saveState());
-    const fromVal = this._getCellRaw(fr, fc);
-    const newVal = fromVal | this._getCellRaw(tr, tc);
-    this._updateHash(fr, fc, 0); this._setCellRaw(fr, fc, 0);
-    this._updateHash(tr, tc, newVal); this._setCellRaw(tr, tc, newVal);
-    this.moveCount++;
-    this.hash ^= zobrist.sideToMove;
-    if (newVal === this.winMask) { this.winner = this.currentPlayer; return true; }
-    this.currentPlayer = this.currentPlayer === 0 ? 1 : 0;
-    return false;
-  }
-
-  evaluate() {
-    let score = 0;
-    const mid = (this.size - 1) / 2;
-    for (let r = 0; r < this.size; r++)
-      for (let c = 0; c < this.size; c++) {
-        const val = this._getCellRaw(r, c);
-        if (val === 0) continue;
-        const cnt = this.countElements(r, c);
-        let mVal = [0, 10, 100, 1000, 10000, 100000, 1000000, 10000000][cnt];
-        const dist = Math.abs(r - mid) + Math.abs(c - mid);
-        score += mVal + (this.size - dist) * 15;
-        if (cnt === this.numElements - 1)
-          for (const [tr, tc] of this.targets[r][c])
-            if ((val | this._getCellRaw(tr, tc)) === this.winMask) score += 50000;
-      }
-    return this.currentPlayer === 0 ? score : -score;
-  }
-
-  reset() {
-    this.board = generateStartingBoard(this.size, this.numElements);
-    this.hash = 0n;
-    for (let r = 0; r < this.size; r++)
-      for (let c = 0; c < this.size; c++)
-        if (this._getCellRaw(r, c) !== 0)
-          this.hash ^= zobrist.table[r * this.size + c][this._getCellRaw(r, c)];
-    this.winner = null;
-    this.moveCount = 0;
-    this.history = [];
-    this.transpositionTable.clear();
-  }
-
-  minimax(depth, alpha, beta, isMax, limit) {
-    this.searchNodes++;
-    if (this.winner !== null) return isMax ? -9999999 : 9999999;
-    if (depth === 0 || Date.now() > limit) return this.evaluate();
-    const cached = this.transpositionTable.get(this.hash);
-    if (cached && cached.depth >= depth) return cached.score;
-    const moves = this.getAllMoves();
-    moves.sort((a, b) => this._moveGain(b) - this._moveGain(a));
-    let bestVal = isMax ? -Infinity : Infinity;
-    for (const m of moves) {
-      const s = this.saveState();
-      this.makeMove(m.from[0], m.from[1], m.to[0], m.to[1]);
-      const val = this.minimax(depth - 1, alpha, beta, !isMax, limit);
-      this.loadState(s);
-      if (isMax) { bestVal = Math.max(bestVal, val); alpha = Math.max(alpha, bestVal); }
-      else { bestVal = Math.min(bestVal, val); beta = Math.min(beta, bestVal); }
-      if (alpha >= beta) break;
+    let best=mx?-Infinity:Infinity;
+    for(const m of ms){
+      if(Date.now()>lim||this.nodes>nl)break;
+      const s=this.snap();this.move(m.from[0],m.from[1],m.to[0],m.to[1]);
+      const val=this.minimax(d-1,a,b,!mx,lim,nl);this.load(s);
+      if(mx){best=Math.max(best,val);a=Math.max(a,best)}
+      else{best=Math.min(best,val);b=Math.min(b,best)}
+      if(a>=b)break;
     }
-    this.transpositionTable.set(this.hash, { score: bestVal, depth });
-    return bestVal;
+    this.tt.set(key,best);return best;
   }
-
-  _moveGain(move) {
-    return this.countElements(move.from[0], move.from[1]) + this.countElements(move.to[0], move.to[1]);
+  aiMove(lvl){
+    const mk=this.owned?'owned':'neutral';
+    const dm=AI_DEPTH[mk][this.sz]||AI_DEPTH[mk][5];
+    const depth=dm[lvl]??2,nl=NODE_LIMIT[this.sz]||30000,lim=Date.now()+TIME_LIMIT_MS;
+    this.nodes=0;
+    const ms=this.moves();if(!ms.length)return null;
+    for(const m of ms){const s=this.snap();const{won}=this.move(m.from[0],m.from[1],m.to[0],m.to[1]);this.load(s);if(won)return m}
+    if(Date.now()>lim)return ms[0];
+    let best=null,bs=-Infinity;
+    for(const m of ms){
+      if(Date.now()>lim||this.nodes>nl)break;
+      const s=this.snap();this.move(m.from[0],m.from[1],m.to[0],m.to[1]);
+      const sc=this.minimax(depth-1,-Infinity,Infinity,false,lim,nl);this.load(s);
+      if(sc>bs){bs=sc;best=m}
+    }
+    return best??ms[0];
   }
-
-  getAIMove(level) {
-    const d = { easy: 1, medium: 2, hard: 3, expert: 3, master: 4, impossible: 5, subit: 6 }[level] || 3;
-    const limit = Date.now() + 2000;
-    this.searchNodes = 0;
-    const moves = this.getAllMoves();
-    if (moves.length === 0) return null;
-    // Check for immediate win first
-    for (const m of moves) {
-      const s = this.saveState();
-      if (this.makeMove(m.from[0], m.from[1], m.to[0], m.to[1])) { this.loadState(s); return m; }
-      this.loadState(s);
-    }
-    let bMove = null, bScore = -Infinity;
-    for (const m of moves) {
-      const s = this.saveState();
-      this.makeMove(m.from[0], m.from[1], m.to[0], m.to[1]);
-      const sc = this.minimax(d - 1, -Infinity, Infinity, false, limit);
-      this.loadState(s);
-      if (sc > bScore) { bScore = sc; bMove = m; }
-      if (this.searchNodes > 500000) break;
-    }
-    return bMove;
+  reset(){
+    const{board,owner}=this.owned?mkOwned(this.sz,this.n):mkNeutral(this.sz,this.n);
+    this.board=board;this.owner=owner;this.hash=0n;
+    for(let r=0;r<this.sz;r++)for(let c=0;c<this.sz;c++)this._xor(r,c);
+    this.winner=null;this.wr=null;this.mc=0;this.cp=0;this.hist=[];this.tt.clear();
   }
 }
 
-// ------------------ HOOKS ------------------
-function useEngine(size, numElements) {
-  const engineRef = useRef(null);
-  if (!engineRef.current || engineRef.current.size !== size || engineRef.current.numElements !== numElements) {
-    engineRef.current = new DynamicBoardEngine(size, numElements);
-  }
-  const genState = (e) => {
-    const s = e.size, b = [];
-    for (let r = 0; r < s; r++) {
-      const row = [];
-      for (let c = 0; c < s; c++) {
-        const v = e._getCellRaw(r, c), ind = [];
-        for (let i = 0; i < e.numElements; i++) if (v & (1 << i)) ind.push(i);
-        row.push(ind);
-      }
-      b.push(row);
-    }
-    return {
-      board: b,
-      currentPlayer: e.currentPlayer,
-      winner: e.winner,
-      moveCount: e.moveCount,
-      nodes: e.searchNodes,
-      canUndo: e.history.length > 0
-    };
+// ── CONFETTI ──────────────────────────────────────
+function spawnConfetti(){
+  const cv=document.createElement('canvas');
+  cv.style.cssText='position:fixed;inset:0;width:100%;height:100%;pointer-events:none;z-index:999';
+  document.body.appendChild(cv);cv.width=window.innerWidth;cv.height=window.innerHeight;
+  const ctx=cv.getContext('2d');
+  const ps=Array.from({length:90},()=>({
+    x:Math.random()*cv.width,y:-20,
+    vx:(Math.random()-.5)*4,vy:Math.random()*4+2,
+    col:`hsl(${Math.random()*360},80%,60%)`,
+    sz:Math.random()*8+4,rot:Math.random()*360,rv:(Math.random()-.5)*8,
+  }));
+  let raf;
+  const draw=()=>{
+    ctx.clearRect(0,0,cv.width,cv.height);let alive=false;
+    ps.forEach(p=>{p.x+=p.vx;p.y+=p.vy;p.rot+=p.rv;p.vy+=.1;
+      if(p.y<cv.height+20)alive=true;
+      ctx.save();ctx.translate(p.x,p.y);ctx.rotate(p.rot*Math.PI/180);
+      ctx.fillStyle=p.col;ctx.fillRect(-p.sz/2,-p.sz/2,p.sz,p.sz*.6);ctx.restore()});
+    if(alive)raf=requestAnimationFrame(draw);else cv.remove();
   };
-  const [state, setState] = useState(() => genState(engineRef.current));
-  useEffect(() => { engineRef.current = new DynamicBoardEngine(size, numElements); setState(genState(engineRef.current)); }, [size, numElements]);
-  const refresh = useCallback(() => setState(genState(engineRef.current)), []);
-  return {
-    ...state,
-    makeMove: (fr, fc, tr, tc) => { const won = engineRef.current.makeMove(fr, fc, tr, tc); refresh(); return won; },
-    resetGame: (fp) => { engineRef.current.currentPlayer = fp; engineRef.current.reset(); refresh(); },
-    undo: () => { if (engineRef.current.history.length > 0) { engineRef.current.loadState(engineRef.current.history.pop()); audio.undo(); refresh(); } },
-    getAIMove: (l) => engineRef.current.getAIMove(l),
-    getWinningMoves: () => engineRef.current.getWinningMoves(),
-    getThreatMap: () => engineRef.current.getThreatMap(),
-    engine: engineRef.current
+  draw();setTimeout(()=>{cancelAnimationFrame(raf);cv.remove()},5000);
+}
+
+// ── useEngine ─────────────────────────────────────
+function useEngine(sz,n,owned){
+  // Engine lives in a ref — never recreated by React renders
+  const engRef=useRef(null);
+  if(!engRef.current||engRef.current.sz!==sz||engRef.current.n!==n||engRef.current.owned!==owned){
+    engRef.current=new Engine(sz,n,owned);
+  }
+
+  const[tick,setTick]=useState(0);
+  const refresh=useCallback(()=>setTick(t=>t+1),[]);
+
+  // Stable functions that always read from the live ref
+  const doMove=useCallback((fr,fc,tr,tc)=>{
+    const r=engRef.current.move(fr,fc,tr,tc);refresh();return r;
+  },[refresh]);
+  const doReset=useCallback(()=>{engRef.current.reset();refresh()},[refresh]);
+  const doUndo=useCallback(()=>{
+    const e=engRef.current;
+    if(e.hist.length>0){e.load(e.hist.pop());sfx.undo();refresh()}
+  },[refresh]);
+  const getAI=useCallback(l=>engRef.current.aiMove(l),[]);
+  const getWinMoves=useCallback(()=>engRef.current.winMoves(),[]);
+  const getThreatMap=useCallback(()=>engRef.current.threatMap(),[]);
+  const getCapThreat=useCallback(()=>engRef.current.capThreat(),[]);
+
+  // Derive snapshot from live engine on every tick
+  const e=engRef.current;
+  const rows=[];
+  for(let r=0;r<e.sz;r++){
+    const row=[];
+    for(let c=0;c<e.sz;c++){
+      const i=e._i(r,c),v=e.board[i],o=e.owner[i];
+      const idx=[];for(let k=0;k<e.n;k++)if(v&(1<<k))idx.push(k);
+      row.push({idx,own:o});
+    }
+    rows.push(row);
+  }
+  const wm=e.winner==null?e.winMoves():[];
+
+  return{
+    eng:engRef.current,
+    board:rows,cp:e.cp,winner:e.winner,wr:e.wr,mc:e.mc,
+    nodes:e.nodes,canUndo:e.hist.length>0,counts:e.counts(),
+    wm,
+    thr:e.winner==null?e.threatMap():new Set(),
+    ct:owned&&e.winner==null?e.capThreat():new Set(),
+    doMove,reset:doReset,undo:doUndo,
+    getAI,getWinMoves,getThreatMap,getCapThreat,
+    // expose ref for imperative checks (avoids stale closure issues in AI timer)
+    engRef,
   };
 }
 
-// ------------------ CONFETTI ------------------
-function Confetti({ active }) {
-  const canvasRef = useRef(null);
-  useEffect(() => {
-    if (!active) return;
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
-    const particles = Array.from({ length: 120 }, () => ({
-      x: Math.random() * canvas.width,
-      y: -20,
-      vx: (Math.random() - 0.5) * 4,
-      vy: Math.random() * 4 + 2,
-      color: `hsl(${Math.random() * 360}, 80%, 60%)`,
-      size: Math.random() * 8 + 4,
-      rotation: Math.random() * 360,
-      rotVel: (Math.random() - 0.5) * 8,
-    }));
-    let raf;
-    const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      particles.forEach(p => {
-        p.x += p.vx; p.y += p.vy; p.rotation += p.rotVel; p.vy += 0.1;
-        ctx.save();
-        ctx.translate(p.x, p.y);
-        ctx.rotate((p.rotation * Math.PI) / 180);
-        ctx.fillStyle = p.color;
-        ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
-        ctx.restore();
-      });
-      if (particles.some(p => p.y < canvas.height + 20)) raf = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => cancelAnimationFrame(raf);
-  }, [active]);
-  if (!active) return null;
-  return <canvas ref={canvasRef} style={{ position: 'fixed', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 999 }} />;
+// ── useTimer ──────────────────────────────────────
+function useTimer(){
+  const[secs,setSecs]=useState(0);
+  const iv=useRef(null),base=useRef(Date.now()),active=useRef(true);
+  useEffect(()=>{
+    iv.current=setInterval(()=>{if(active.current)setSecs(Math.floor((Date.now()-base.current)/1000))},500);
+    return()=>clearInterval(iv.current);
+  },[]);
+  return{
+    t:secs,fmt:fmtT(secs),
+    stop:useCallback(()=>{active.current=false},[]),
+    reset:useCallback(()=>{active.current=true;base.current=Date.now();setSecs(0)},[]),
+  };
 }
 
-// ------------------ VISUAL PIECE ------------------
-const VisualPiece = React.memo(({ indices, theme, colors, isWinner }) => {
-  const count = indices.length;
-  if (count === 0) return null;
-  if (theme === 'colors') {
-    if (count === 1) {
-      return (
-        <div className={`radial-piece ${isWinner ? 'winner-piece' : ''}`}
-          style={{ backgroundColor: colors[indices[0]], width: '82%', height: '82%', borderRadius: '50%', boxShadow: `0 0 12px ${colors[indices[0]]}88` }} />
-      );
-    }
-    const step = 360 / count;
-    const bg = `conic-gradient(${indices.map((idx, i) => `${colors[idx]} ${i * step}deg ${(i + 1) * step}deg`).join(', ')})`;
-    return (
-      <div className={`radial-piece ${isWinner ? 'winner-piece' : ''}`}
-        style={{ background: bg, width: '82%', height: '82%', borderRadius: '50%', boxShadow: '0 0 14px rgba(255,255,255,0.2)' }} />
-    );
+// ── PIECE ─────────────────────────────────────────
+const Piece=React.memo(({idx,own,theme,colors,owned})=>{
+  if(!idx.length)return null;
+  const bg=owned?(own===0?'o0':own===1?'o1':'n'):'n';
+  if(theme==='colors'){
+    const step=360/idx.length;
+    const grad=idx.length===1?colors[idx[0]]
+      :`conic-gradient(${idx.map((x,i)=>`${colors[x]} ${i*step}deg ${(i+1)*step}deg`).join(',')})`;
+    return<><div className={`pbg ${bg}`}/><div className="pdisc" style={{background:grad}}/></>;
   }
-  return (
-    <div className={`crystal-piece count-${count} ${isWinner ? 'winner-piece' : ''}`}>
-      {indices.map(idx => <span key={idx} className={`element elem-${idx + 1}`}>{ELEMENTS[idx]}</span>)}
-    </div>
-  );
+  return<><div className={`pbg ${bg}`}/><div className={`pels c${idx.length}`}>{idx.map(x=><span key={x} className="el">{EL[x]}</span>)}</div></>;
 });
 
-// ------------------ BOARD ------------------
-const Board = ({ board, theme, selected, validMoves, onCellClick, colors, winningMoves, threatMap, lastMove, showHints }) => {
-  const winFrom = showHints ? new Set(winningMoves.map(m => `${m.from[0]},${m.from[1]}`)) : new Set();
-  const winTo = showHints ? new Set(winningMoves.map(m => `${m.to[0]},${m.to[1]}`)) : new Set();
-
-  return (
-    <div className="board-wrapper">
-      <div className="board" style={{ '--board-size': board.length }}>
-        {board.map((row, r) => row.map((ind, c) => {
-          const key = `${r},${c}`;
-          const isSelected = selected?.r === r && selected?.c === c;
-          const isValid = validMoves.some(([nr, nc]) => nr === r && nc === c);
-          const isLastFrom = lastMove?.from[0] === r && lastMove?.from[1] === c;
-          const isLastTo = lastMove?.to[0] === r && lastMove?.to[1] === c;
-          const isWinFrom = winFrom.has(key);
-          const isWinTo = winTo.has(key);
-          const isThreat = showHints && threatMap.has(key) && !isWinFrom && !isWinTo;
-          const isEmpty = ind.length === 0;
-
-          return (
-            <div
-              key={key}
-              className={[
-                'cell',
-                isSelected ? 'selected' : '',
-                isValid ? 'valid' : '',
-                isLastFrom || isLastTo ? 'last-move' : '',
-                isWinFrom ? 'win-hint-from' : '',
-                isWinTo ? 'win-hint-to' : '',
-                isThreat ? 'threat-cell' : '',
-                isEmpty ? 'empty-cell' : '',
-              ].filter(Boolean).join(' ')}
-              onClick={() => onCellClick(r, c)}
-            >
-              {isValid && isEmpty && <div className="valid-dot" />}
-              <VisualPiece indices={ind} theme={theme} colors={colors} />
+// ── BOARD ─────────────────────────────────────────
+const Board=React.memo(({board,theme,sel,validMoves,onClick,colors,wm,hints,cp,owned,lastMove,thr,ct})=>{
+  const sz=board.length,mid=Math.floor(sz/2);
+  const wF=new Set(wm.map(m=>`${m.from[0]},${m.from[1]}`));
+  const wT=new Set(wm.map(m=>`${m.to[0]},${m.to[1]}`));
+  return(
+    <div className="bwrap">
+      <div className="board" style={{gridTemplateColumns:`repeat(${sz},var(--cell))`,gridTemplateRows:`repeat(${sz},var(--cell))`}}>
+        {board.map((row,r)=>row.map(({idx,own},c)=>{
+          const key=`${r},${c}`;
+          const isSel=sel?.r===r&&sel?.c===c;
+          // isV: this cell is a valid move target (not the selected cell itself)
+          const isV=!isSel&&validMoves.some(([nr,nc])=>nr===r&&nc===c);
+          const isWF=wF.has(key),isWT=wT.has(key);
+          const isLast=lastMove&&(
+            (lastMove.from[0]===r&&lastMove.from[1]===c)||
+            (lastMove.to[0]===r&&lastMove.to[1]===c));
+          const isCtr=owned&&sz%2===1&&r===mid&&c===mid&&own===EMPTY;
+          const cls=[
+            'cell',
+            isSel ?'sel' :'',
+            isV   ?'valid':'',   // ALL valid targets → green ring only, no other class
+            isLast?'last':'',
+            isWF  ?'wf'  :'',
+            isWT  ?'wt'  :'',
+            hints&&thr.has(key)&&!isWF&&!isWT?'thr':'',
+            hints&&owned&&ct.has(key)?'ct':'',
+            own===EMPTY?'mt':'',
+            isCtr ?'nctr':'',
+          ].filter(Boolean).join(' ');
+          return(
+            <div key={key} className={cls} onClick={()=>onClick(r,c)}>
+              <Piece idx={idx} own={own} theme={theme} colors={colors} owned={owned}/>
             </div>
           );
         }))}
       </div>
     </div>
   );
-};
+});
 
-// ------------------ TIMER HOOK ------------------
-function useTimer(running) {
-  const [elapsed, setElapsed] = useState(0);
-  const ref = useRef(null);
-  const startRef = useRef(Date.now());
+// ── PLAYER STRIP ──────────────────────────────────
+const PlayerStrip=React.memo(({p,label,active,counts,totalPieces,collectedSet,n})=>{
+  const cnt=counts[p],pct=Math.min(100,Math.round(cnt/Math.max(totalPieces,1)*100));
+  return(
+    <div className={`pstrip p${p}${active?' active':''}`}>
+      <div className="ps-av">{p===0?'You':'AI'}</div>
+      <div className="ps-info">
+        <div className="ps-name">{label}</div>
+        <div className={`ps-st${active?' on':''}`}>{active?'YOUR TURN ▶':'waiting'}</div>
+      </div>
+      <div className="ps-els">
+        {Array.from({length:n},(_,k)=>(
+          <div key={k} className={`eldot ${collectedSet.has(k)?'have':'miss'}`} title={EN_ELEM[k]}>{EL[k]}</div>
+        ))}
+      </div>
+      <div className="ps-cnt">
+        <div className="ps-num">{cnt}</div>
+        <div className="ps-bw"><div className="ps-bf" style={{width:`${pct}%`}}/></div>
+      </div>
+    </div>
+  );
+});
 
-  useEffect(() => {
-    startRef.current = Date.now() - elapsed * 1000;
-    if (running) {
-      ref.current = setInterval(() => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)), 500);
-    } else {
-      clearInterval(ref.current);
-    }
-    return () => clearInterval(ref.current);
-  }, [running]);
+// ── INFO CARD ─────────────────────────────────────
+const InfoCard=React.memo(({selCell,eng,colors,owned})=>{
+  if(!selCell)return<div className="panel info-empty">Click a piece<br/>to inspect it</div>;
+  const i=eng._i(selCell.r,selCell.c),v=eng.board[i],o=eng.owner[i];
+  const idx=[];for(let k=0;k<eng.n;k++)if(v&(1<<k))idx.push(k);
+  const pct=Math.round(idx.length/eng.n*100);
+  return(
+    <div className="panel">
+      {owned&&o!==EMPTY&&(
+        <div className="iowner" style={{background:`${PC[o]}22`,color:PC[o],border:`1px solid ${PC[o]}44`}}>
+          {o===0?'Your piece':"Opponent's piece"}
+        </div>
+      )}
+      <div className="slbl">Composition</div>
+      <div className="progrow">
+        <div className="progt"><div className="progf" style={{width:`${pct}%`}}/></div>
+        <span className="progp">{pct}%</span>
+      </div>
+      <div className="echips">
+        {Array.from({length:eng.n},(_,k)=>(
+          <span key={k} className={`echip ${idx.includes(k)?'have':'miss'}`}
+            style={idx.includes(k)?{'--ec':colors[k]}:{}}>
+            {EL[k]} {EN_ELEM[k]}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+});
 
-  const reset = useCallback(() => { setElapsed(0); startRef.current = Date.now(); }, []);
-  const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-  return { elapsed, fmt: fmt(elapsed), reset };
-}
-
-// ------------------ MOVE HISTORY ------------------
-const MoveHistory = ({ history }) => {
-  const ref = useRef(null);
-  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [history]);
-  if (!history.length) return null;
-  return (
-    <div className="move-history glass-panel">
-      <div className="section-label">📜 Журнал ходів</div>
-      <div ref={ref} className="move-list">
-        {history.map((h, i) => (
-          <div key={i} className={`move-entry ${h.player === 0 ? 'p1' : 'p2'}`}>
-            <span className="move-num">{i + 1}.</span>
-            <span className="move-player">{h.player === 0 ? '👤' : '🤖'}</span>
-            <span className="move-coords">{String.fromCharCode(65 + h.from[1])}{h.from[0]+1}→{String.fromCharCode(65 + h.to[1])}{h.to[0]+1}</span>
+// ── MOVE LOG ──────────────────────────────────────
+const MoveLog=React.memo(({moveLog,owned})=>{
+  const ref=useRef(null);
+  useEffect(()=>{if(ref.current)ref.current.scrollTop=ref.current.scrollHeight},[moveLog]);
+  if(!moveLog.length)return null;
+  const recent=moveLog.slice(-30),offset=moveLog.length-recent.length;
+  return(
+    <div className="panel">
+      <div className="slbl">Move Log</div>
+      <div ref={ref} className="log-list">
+        {recent.map((h,k)=>(
+          <div key={k} className="logrow">
+            <span className="lnum">{offset+k+1}.</span>
+            <span className="ldot" style={{background:PC[h.p]}}/>
+            <span className="lmv">{coord(h.from[0],h.from[1])}→{coord(h.to[0],h.to[1])}</span>
+            {owned&&h.cap&&<span className="lcap">⚔️</span>}
           </div>
         ))}
       </div>
     </div>
   );
-};
+});
 
-// ------------------ INFO CARD ------------------
-const InfoCard = ({ cell, colors, numElements }) => {
-  if (!cell) return (
-    <div className="info-card glass-panel empty-info">
-      <div className="info-hint">Оберіть фігуру для аналізу складу</div>
-    </div>
-  );
-  const { indices } = cell;
-  const present = indices.map(i => ({ i, name: ELEMENT_NAMES[i], color: colors[i], icon: ELEMENTS[i] }));
-  const missing = Array.from({ length: numElements }, (_, i) => i)
-    .filter(i => !indices.includes(i))
-    .map(i => ({ i, name: ELEMENT_NAMES[i], color: colors[i], icon: ELEMENTS[i] }));
-  const completeness = Math.round((indices.length / numElements) * 100);
-
-  return (
-    <div className="info-card glass-panel">
-      <div className="section-label">Склад фігури</div>
-      <div className="completeness-bar">
-        <div className="completeness-fill" style={{ width: `${completeness}%` }} />
-        <span className="completeness-label">{completeness}%</span>
+// ── WIN SCREEN ────────────────────────────────────
+// Uses a stable ref for onRematch so the 4-second timer always
+// calls the *current* reset function even after re-renders.
+const WinScreen=React.memo(({winner,wr,mode,owned,mc,elapsed,onRematch})=>{
+  const title=winner===0
+    ?(mode==='vsAI'?'You won!':'Player 1 wins!')
+    :(mode==='vsAI'?'AI wins!':'Player 2 wins!');
+  const reason=owned
+    ?(wr==='elements'?'⚗️ All elements collected':'⚔️ All enemy pieces destroyed')
+    :'⚗️ All elements collected';
+  return(
+    <div className="win-mask"><div className="win-box">
+      <div className="wico">{owned&&wr==='annihilation'?'⚔️':'⚗️'}</div>
+      <div className="wttl" style={{color:PC[winner]}}>{title}</div>
+      <div className="wrsn">{reason}</div>
+      <div className="wstats">
+        <div className="wstat"><span>Moves</span><strong>{mc}</strong></div>
+        <div className="wstat"><span>Time</span><strong>{fmtT(elapsed)}</strong></div>
       </div>
-      <div className="el-list">{present.map(p => (
-        <span key={p.i} className="el-tag present" style={{ borderLeft: `3px solid ${p.color}` }}>
-          {p.icon} {p.name}
-        </span>
-      ))}</div>
-      {missing.length > 0 && (
-        <div style={{ marginTop: 8 }}>
-          <div className="section-label" style={{ fontSize: '0.65rem', opacity: 0.5 }}>Бракує:</div>
-          <div className="el-list">{missing.map(m => (
-            <span key={m.i} className="el-tag missing" style={{ borderLeft: `3px solid ${m.color}` }}>
-              {m.icon} {m.name}
-            </span>
-          ))}</div>
-        </div>
-      )}
-    </div>
+      <button className="btn-rm" onClick={onRematch}>🔄 Play again</button>
+    </div></div>
   );
-};
+});
 
-// ------------------ WIN SCREEN ------------------
-const WinScreen = ({ winner, gameMode, moveCount, elapsed, onRematch }) => (
-  <div className="win-overlay">
-    <div className="win-modal glass-panel">
-      <div className="win-icon">{winner === 0 ? '👤' : '🤖'}</div>
-      <h2 className="win-title">{winner === 0 ? 'Гравець перемагає!' : (gameMode === 'vsAI' ? 'ШІ перемагає!' : 'Гравець 2 перемагає!')}</h2>
-      <div className="win-stats">
-        <div className="win-stat"><span>⚡ Ходів</span><strong>{moveCount}</strong></div>
-        <div className="win-stat"><span>⏱ Час</span><strong>{`${String(Math.floor(elapsed / 60)).padStart(2, '0')}:${String(elapsed % 60).padStart(2, '0')}`}</strong></div>
-      </div>
-      <button className="rematch-btn" onClick={onRematch}>🔄 Грати знову</button>
+// ── GUIDE MODAL ───────────────────────────────────
+const Guide=React.memo(({onClose})=>(
+  <div className="win-mask" onClick={onClose}>
+    <div className="guide-box" onClick={e=>e.stopPropagation()}>
+      <button className="guide-close" onClick={onClose}>✕</button>
+      <h2 className="guide-title">How to Play Aether Ultimate</h2>
+      <section className="guide-section">
+        <h3>⚡ Core Rules</h3>
+        <p>Each cell holds a <strong>piece</strong> carrying elemental symbols (🔥💧🌍💨…). Pieces move like a <strong>chess knight</strong> (L-shape: 2+1). The board wraps — moving off one edge brings you out the other side.</p>
+        <p>When a piece lands on another they <strong>merge</strong>: elements combine. <strong>Win:</strong> collect all N elements in one piece.</p>
+      </section>
+      <section className="guide-section">
+        <h3>🎮 Modes</h3>
+        <p><strong>Neutral</strong> — shared board, move any piece. First to merge all elements wins.</p>
+        <p><strong>Owned 🔵🔴</strong> — you control blue (bottom), AI controls red (top). Also win by destroying all enemy pieces.</p>
+      </section>
+      <section className="guide-section">
+        <h3>🟢 Board Indicators</h3>
+        <ul>
+          <li><span className="gi-ring ok"/> <strong>Green ring</strong> — valid move target</li>
+          <li><span className="gi-ring win"/> <strong>Gold border</strong> — winning move available</li>
+          <li>💡 badge = number of winning moves right now</li>
+        </ul>
+      </section>
+      <section className="guide-section">
+        <h3>♟️ Tactics</h3>
+        <p><strong>Take win moves immediately</strong> — gold ring means you're one step away.</p>
+        <p><strong>Neutral:</strong> merge pieces with different elements. Merging duplicates wastes a move.</p>
+        <p><strong>Owned:</strong> captures both weaken the opponent and advance your collection. Fork threats (two simultaneous win paths) are decisive.</p>
+      </section>
+      <section className="guide-section">
+        <h3>🧠 Strategy</h3>
+        <p><strong>Diversity:</strong> keep pieces heterogeneous — one piece with 4 different elements beats four pieces each with one.</p>
+        <p><strong>Tempo:</strong> every move that doesn't add a new element somewhere is a wasted move.</p>
+        <p><strong>Piece economy (owned):</strong> prioritise captures that also advance your elements.</p>
+      </section>
+      <section className="guide-section">
+        <h3>⚙️ Settings</h3>
+        <ul>
+          <li><strong>Board</strong> — 3×3 to 8×8</li>
+          <li><strong>Elements</strong> — 3–8 (≤ board size). More = longer game.</li>
+          <li><strong>Pieces</strong> — Neutral or Owned mode</li>
+          <li><strong>AI level</strong> — Easy to ∞</li>
+          <li><strong>Hints</strong> — show/hide winning-move highlights</li>
+        </ul>
+      </section>
     </div>
   </div>
-);
+));
 
-// ------------------ MAIN APP ------------------
-function App() {
-  const [boardSize, setBoardSize] = useState(5);
-  const [numElements, setNumElements] = useState(5);
-  const [theme, setTheme] = useState('elements');
-  const [gameMode, setGameMode] = useState('vsAI');
-  const [aiDifficulty, setAiDifficulty] = useState('medium');
-  const [firstPlayer] = useState(0);
+// ── MAIN APP ──────────────────────────────────────
+export default function App(){
+  const[sz,    setSzRaw]=useState(5);
+  const[n,     setN    ]=useState(5);
+  const[theme, setTheme]=useState('elements');
+  const[mode,  setMode ]=useState('vsAI');
+  const[lvl,   setLvl  ]=useState('medium');
+  const[owned, setOwned]=useState(false);
+  const[hints, setHints]=useState(true);
+  const[guide, setGuide]=useState(false);
 
-  const [selected, setSelected] = useState(null);
-  const [validMoves, setValidMoves] = useState([]);
-  const [aiThinking, setAiThinking] = useState(false);
-  const [infoCell, setInfoCell] = useState(null);
-  const [showHints, setShowHints] = useState(true);
-  const [moveHistory, setMoveHistory] = useState([]);
-  const [lastMove, setLastMove] = useState(null);
-  const [showWin, setShowWin] = useState(false);
+  const[sel,        setSel       ]=useState(null);
+  const[validMoves, setValidMoves]=useState([]);
+  const[aiRunning,  setAiRunning ]=useState(false);
+  const[moveLog,    setMoveLog   ]=useState([]);
+  const[lastMove,   setLastMove  ]=useState(null);
+  const[showWin,    setShowWin   ]=useState(false);
 
-  const colors = useMemo(() => getElementColors(numElements), [numElements]);
+  const colors=React.useMemo(()=>elc(n),[n]);
 
-  const { board, currentPlayer, winner, moveCount, nodes, canUndo, makeMove, resetGame, getAIMove, getWinningMoves, getThreatMap, engine, undo } = useEngine(boardSize, numElements);
-  const thinkRef = useRef(false);
-  const timer = useTimer(winner === null && !showWin);
+  const{
+    eng,engRef,board,cp,winner,wr,mc,nodes,canUndo,counts,wm,thr,ct,
+    doMove,reset,undo,getAI,
+  }=useEngine(sz,n,owned);
 
-  const winningMoves = useMemo(() => showHints && winner === null ? getWinningMoves() : [], [board, showHints, winner]);
-  const threatMap = useMemo(() => showHints && winner === null ? getThreatMap() : new Set(), [board, showHints, winner]);
+  // Single ref for pending AI timeout — cancel on reset
+  const aiTimer=useRef(null);
+  const timer=useTimer();
 
-  useEffect(() => {
-    if (winner !== null && !showWin) {
-      audio.win();
-      setTimeout(() => setShowWin(true), 400);
+  const coll=React.useMemo(()=>{
+    const s=[new Set(),new Set()];
+    board.forEach(row=>row.forEach(({idx,own})=>{if(own===0||own===1)idx.forEach(k=>s[own].add(k))}));
+    return s;
+  },[board]);
+  const totalPieces=React.useMemo(()=>Math.floor(sz/2)*sz+(sz%2===1?(sz-1):0),[sz]);
+
+  // Win detection
+  useEffect(()=>{
+    if(winner!=null&&!showWin){
+      sfx.win();timer.stop();
+      setTimeout(()=>{setShowWin(true);spawnConfetti()},350);
     }
-  }, [winner]);
+  },[winner]);// eslint-disable-line
 
-  const handleRematch = useCallback(() => {
+  const clearSel=useCallback(()=>{setSel(null);setValidMoves([])},[]);
+
+  // ── handleReset ────────────────────────────────────────────────────────────
+  // The single authoritative "new game" function.
+  // Key guarantee: clears aiTimer BEFORE reset so no stale AI callback can fire.
+  const handleReset=useCallback(()=>{
+    // 1. Kill any pending AI timeout by id
+    if(aiTimer.current!==null){
+      clearTimeout(aiTimer.current);
+      aiTimer.current=null;
+    }
+    // 2. Synchronously clear all UI state
+    setAiRunning(false);
     setShowWin(false);
-    setMoveHistory([]);
+    setMoveLog([]);
     setLastMove(null);
-    setSelected(null);
-    setValidMoves([]);
-    setInfoCell(null);
+    clearSel();
     timer.reset();
-    resetGame(firstPlayer);
-  }, [resetGame, firstPlayer, timer]);
+    // 3. Reset the engine (triggers re-render via tick)
+    reset();
+  // reset and clearSel are stable useCallbacks; timer.reset is stable too
+  },[reset,clearSel,timer.reset]);// eslint-disable-line
 
-  const handleNewGame = useCallback(() => {
-    setShowWin(false);
-    setMoveHistory([]);
-    setLastMove(null);
-    setSelected(null);
-    setValidMoves([]);
-    setInfoCell(null);
-    timer.reset();
-    resetGame(firstPlayer);
-  }, [resetGame, firstPlayer, timer]);
+  // Reset when owned mode switches
+  const prevOwned=useRef(owned);
+  useEffect(()=>{
+    if(prevOwned.current!==owned){prevOwned.current=owned;handleReset()}
+  },[owned]);// eslint-disable-line
 
-  const onCellClick = useCallback((r, c) => {
-    if (winner !== null || aiThinking) return;
-    if (gameMode === 'vsAI' && currentPlayer === 1) return;
-    const ind = board[r][c];
+  // ── execMove ───────────────────────────────────────────────────────────────
+  const execMove=useCallback((fr,fc,tr,tc,player)=>{
+    const tgtV=eng.board[eng._i(tr,tc)],tgtO=eng.owner[eng._i(tr,tc)];
+    if(owned&&tgtO!==EMPTY&&tgtO!==player)sfx.capture();
+    else if(tgtV)sfx.merge();
+    else sfx.move();
+    const res=doMove(fr,fc,tr,tc);
+    setMoveLog(prev=>[...prev,{from:[fr,fc],to:[tr,tc],p:player,cap:!!res.captured}]);
+    setLastMove({from:[fr,fc],to:[tr,tc]});
+    return res;
+  },[eng,owned,doMove]);
 
-    if (!selected) {
-      if (ind.length > 0) {
-        audio.select();
-        setSelected({ r, c });
-        setValidMoves(engine.targets[r][c]);
-        setInfoCell({ r, c, indices: ind });
+  // ── triggerAI ──────────────────────────────────────────────────────────────
+  // Reads from engRef.current (not closure-captured eng) so it always sees
+  // the post-reset engine state even if called from a stale closure.
+  const triggerAI=useCallback(()=>{
+    const e=engRef.current;
+    if(mode!=='vsAI'||e.cp!==1||e.winner!=null||aiTimer.current!==null)return;
+    setAiRunning(true);
+    aiTimer.current=setTimeout(()=>{
+      aiTimer.current=null;
+      const e2=engRef.current; // read live ref — never stale
+      if(e2.winner!=null||e2.cp!==1){setAiRunning(false);return}
+      const m=getAI(lvl);
+      if(m){
+        const player=e2.cp;
+        execMove(m.from[0],m.from[1],m.to[0],m.to[1],player);
       }
-    } else {
-      const isValid = validMoves.some(([nr, nc]) => nr === r && nc === c);
-      if (isValid) {
-        const fromVal = engine._getCellRaw(selected.r, selected.c);
-        const toVal = engine._getCellRaw(r, c);
-        const merged = fromVal | toVal;
-        if (merged === engine.winMask) audio.merge();
-        else if (toVal !== 0) audio.merge();
-        else audio.move();
-        makeMove(selected.r, selected.c, r, c);
-        setMoveHistory(prev => [...prev, { from: [selected.r, selected.c], to: [r, c], player: currentPlayer }]);
-        setLastMove({ from: [selected.r, selected.c], to: [r, c] });
-        setSelected(null);
-        setValidMoves([]);
-        setInfoCell(null);
-      } else if (r === selected.r && c === selected.c) {
-        setSelected(null);
-        setValidMoves([]);
-        setInfoCell(null);
-      } else if (ind.length > 0) {
-        audio.select();
-        setSelected({ r, c });
-        setValidMoves(engine.targets[r][c]);
-        setInfoCell({ r, c, indices: ind });
-      } else {
-        setSelected(null);
-        setValidMoves([]);
-        setInfoCell(null);
+      setAiRunning(false);
+    },lvl==='easy'?400:900);
+  },[mode,lvl,getAI,execMove,engRef]);
+
+  // ── handleCellClick ────────────────────────────────────────────────────────
+  const handleCellClick=useCallback((r,c)=>{
+    if(winner!=null||aiRunning)return;
+    if(mode==='vsAI'&&cp===1)return;
+    const v=eng.board[eng._i(r,c)],o=eng.owner[eng._i(r,c)];
+    const mine=owned?o===cp:v>0;
+    const isVld=validMoves.some(([nr,nc])=>nr===r&&nc===c);
+    if(!sel){
+      if(mine){sfx.select();setSel({r,c});setValidMoves(eng.tg[r][c])}
+    }else{
+      if(isVld){
+        clearSel();
+        const res=execMove(sel.r,sel.c,r,c,eng.cp);
+        if(res&&!res.won)triggerAI();
+      }else if(r===sel.r&&c===sel.c){
+        clearSel();
+      }else if(mine){
+        sfx.select();setSel({r,c});setValidMoves(eng.tg[r][c]);
+      }else{
+        clearSel();
       }
     }
-  }, [winner, aiThinking, gameMode, currentPlayer, board, selected, validMoves, engine, makeMove]);
+  },[winner,aiRunning,mode,cp,sel,validMoves,eng,owned,execMove,clearSel,triggerAI]);
 
-  useEffect(() => {
-    if (gameMode === 'vsAI' && currentPlayer === 1 && winner === null && !thinkRef.current) {
-      thinkRef.current = true;
-      setAiThinking(true);
-      const delay = aiDifficulty === 'easy' ? 600 : 1200;
-      setTimeout(() => {
-        const m = getAIMove(aiDifficulty);
-        if (m) {
-          audio.move();
-          makeMove(m.from[0], m.from[1], m.to[0], m.to[1]);
-          setMoveHistory(prev => [...prev, { from: m.from, to: m.to, player: 1 }]);
-          setLastMove({ from: m.from, to: m.to });
-        }
-        setAiThinking(false);
-        thinkRef.current = false;
-      }, delay);
-    }
-  }, [currentPlayer, winner, gameMode, aiDifficulty, getAIMove, makeMove]);
-
-  const elementCounts = useMemo(() => {
-    const counts = Array(numElements).fill(0);
-    board.forEach(row => row.forEach(ind => ind.forEach(i => i < numElements && counts[i]++)));
-    return counts;
-  }, [board, numElements]);
-
-  const handleUndo = useCallback(() => {
-    if (!canUndo) return;
-    // Undo twice in vsAI mode to undo AI's response too
+  // ── handleUndo ─────────────────────────────────────────────────────────────
+  const handleUndo=useCallback(()=>{
+    if(!canUndo)return;
     undo();
-    if (gameMode === 'vsAI' && engine.history.length > 0) undo();
-    setSelected(null);
-    setValidMoves([]);
-    setInfoCell(null);
-    setLastMove(null);
-    setMoveHistory(prev => {
-      const next = [...prev];
-      next.pop();
-      if (gameMode === 'vsAI') next.pop();
-      return next;
-    });
-  }, [canUndo, undo, gameMode, engine]);
+    if(mode==='vsAI'&&eng.hist.length>0&&eng.cp===1)undo();
+    clearSel();setLastMove(null);
+    setMoveLog(prev=>{const a=[...prev];a.pop();if(mode==='vsAI'&&a.length)a.pop();return a});
+  },[canUndo,undo,mode,eng,clearSel]);
 
-  return (
-    <div className="aether-game">
-      <Confetti active={showWin} />
-      {showWin && <WinScreen winner={winner} gameMode={gameMode} moveCount={moveCount} elapsed={timer.elapsed} onRematch={handleRematch} />}
+  const setSz=useCallback((v)=>{setSzRaw(v);setN(prev=>Math.min(prev,v))},[]);
 
-      <header className="game-header">
-        <h1 className="game-title">AETHER <span>ULTIMATE</span></h1>
-        <div className="header-badges">
-          <div className="timer-badge">{timer.fmt}</div>
-          <div className="move-badge">Хід {moveCount + 1}</div>
+  // Status bar
+  let stTxt,stCol;
+  if(winner!=null){
+    stTxt=`🏆 ${winner===0?(mode==='vsAI'?'You won!':'Player 1 wins!'):(mode==='vsAI'?'AI wins!':'Player 2 wins!')}`;
+    stCol='var(--gold)';
+  }else if(aiRunning){
+    stTxt='🤖 Thinking...';stCol=PC[1];
+  }else{
+    stTxt=cp===0?'● Your turn':(mode==='vsAI'?`● AI's turn`:'● Player 2\'s turn');
+    stCol=PC[cp];
+  }
+
+  return(
+    <div className="app">
+      {guide&&<Guide onClose={()=>setGuide(false)}/>}
+      {showWin&&winner!=null&&(
+        <WinScreen winner={winner} wr={wr} mode={mode} owned={owned}
+          mc={mc} elapsed={timer.t} onRematch={handleReset}/>
+      )}
+
+      <header className="hdr">
+        <div className="htitle">AETHER <em>ULTIMATE</em></div>
+        <div className="hbadges">
+          <div className="badge timer">{timer.fmt}</div>
+          <div className="badge">Move {mc+1}</div>
+          <button className="btn-help" onClick={()=>setGuide(true)}>?</button>
         </div>
       </header>
 
-      {/* Control Panel */}
-      <div className="control-strip glass-panel">
-        <div className="control-group">
-          <span className="ctrl-label">Поле</span>
-          <div className="seg-ctrl">{[3,4,5,6,7,8].map(s => (
-            <button key={s} className={boardSize===s?'active':''} onClick={()=>{setBoardSize(s); handleNewGame();}}>{s}×{s}</button>
-          ))}</div>
+      {owned&&<PlayerStrip p={1} label={mode==='vsAI'?'Opponent (AI)':'Player 2'}
+        active={cp===1&&winner==null&&!aiRunning}
+        counts={counts} totalPieces={totalPieces} collectedSet={coll[1]} n={n}/>}
+
+      <div className={`sbar${winner!=null?' won':''}`} style={{'--sc':stCol}}>
+        <span className={aiRunning?'thinking':''} style={{color:stCol}}>{stTxt}</span>
+        <div className="sbar-r">
+          {aiRunning&&<span className="nc">{nodes} nodes</span>}
+          {wm.length>0&&winner==null&&<span className="hbadge">💡 {wm.length} winning</span>}
         </div>
-        <div className="control-group">
-          <span className="ctrl-label">Стихії</span>
-          <div className="seg-ctrl">{[3,4,5,6,7,8].filter(v=>v<=boardSize).map(k => (
-            <button key={k} className={numElements===k?'active':''} onClick={()=>{setNumElements(k); handleNewGame();}}>{k}</button>
-          ))}</div>
-        </div>
-        <div className="control-group">
-          <span className="ctrl-label">Режим</span>
-          <div className="seg-ctrl">
-            <button className={gameMode==='twoPlayer'?'active':''} onClick={()=>setGameMode('twoPlayer')}>👥</button>
-            <button className={gameMode==='vsAI'?'active':''} onClick={()=>setGameMode('vsAI')}>🤖</button>
-          </div>
-        </div>
-        {gameMode==='vsAI' && (
-          <div className="control-group">
-            <span className="ctrl-label">Рівень ШІ</span>
-            <div className="seg-ctrl" style={{fontSize:'0.6rem'}}>
-              {['easy','medium','hard','expert','impossible'].map(l=>(
-                <button key={l} className={aiDifficulty===l?'active':''} onClick={()=>setAiDifficulty(l)}>{
-                  {easy:'Легко',medium:'Середн.',hard:'Важко',expert:'Екс.',impossible:'∞'}[l]
-                }</button>
-              ))}
-            </div>
-          </div>
-        )}
-        <div className="control-group">
-          <span className="ctrl-label">Вигляд</span>
-          <div className="seg-ctrl">
-            <button className={theme==='elements'?'active':''} onClick={()=>setTheme('elements')}>🔮</button>
-            <button className={theme==='colors'?'active':''} onClick={()=>setTheme('colors')}>🌈</button>
-          </div>
-        </div>
-        <div className="control-group">
-          <span className="ctrl-label">Підказки</span>
-          <div className="seg-ctrl">
-            <button className={showHints?'active':''} onClick={()=>setShowHints(!showHints)}>{showHints?'✅':'⬜'}</button>
-          </div>
-        </div>
-        <button className="new-game-btn" onClick={handleNewGame}>🔄 НОВА ГРА</button>
       </div>
 
-      {/* Status Bar */}
-      <div className={`status-bar ${winner !== null ? 'won' : ''} ${currentPlayer === 0 ? 'p1-turn' : 'p2-turn'}`}>
-        {winner !== null ? (
-          <span>🏆 {winner === 0 ? 'Гравець переміг!' : (gameMode === 'vsAI' ? 'ШІ переміг!' : 'Гравець 2 переміг!')}</span>
-        ) : aiThinking ? (
-          <span className="thinking-pulse">🤖 Аналізую позицію... <span className="node-count">({nodes} вузлів)</span></span>
-        ) : (
-          <span>{currentPlayer === 0 ? '👤 Ваш хід' : (gameMode === 'vsAI' ? '🤖 Хід ШІ' : '👤 Хід гравця 2')}</span>
-        )}
-        {winningMoves.length > 0 && winner === null && (
-          <span className="hint-badge">💡 {winningMoves.length} виграшних ходи</span>
-        )}
+      <div className="game-row">
+        <Board board={board} theme={theme} sel={sel} validMoves={validMoves}
+          onClick={handleCellClick} colors={colors} wm={wm} thr={thr} ct={ct}
+          lastMove={lastMove} hints={hints} cp={cp} owned={owned}/>
+        <div className="side">
+          <InfoCard selCell={sel} eng={eng} colors={colors} owned={owned}/>
+          <MoveLog moveLog={moveLog} owned={owned}/>
+          <button className="undo" onClick={handleUndo} disabled={!canUndo}>↩ Undo</button>
+        </div>
       </div>
 
-      {/* Main Game Area */}
-      <div className="game-area">
-        <Board
-          board={board}
-          theme={theme}
-          selected={selected}
-          validMoves={validMoves}
-          onCellClick={onCellClick}
-          colors={colors}
-          winningMoves={winningMoves}
-          threatMap={threatMap}
-          lastMove={lastMove}
-          showHints={showHints}
-        />
+      {owned&&<PlayerStrip p={0} label={mode==='vsAI'?'You':'Player 1'}
+        active={cp===0&&winner==null&&!aiRunning}
+        counts={counts} totalPieces={totalPieces} collectedSet={coll[0]} n={n}/>}
 
-        <div className="side-panel">
-          <InfoCard cell={infoCell} colors={colors} numElements={numElements} />
+      <div className="settings">
+        <div className="sg"><span className="sglbl">Board</span>
+          <div className="seg">{[3,4,5,6,7,8].map(s=>(
+            <button key={s} className={sz===s?'on':''} onClick={()=>setSz(s)}>{s}×{s}</button>
+          ))}</div></div>
+        <div className="sdiv"/>
+        <div className="sg"><span className="sglbl">Elements</span>
+          <div className="seg">{[3,4,5,6,7,8].filter(v=>v<=sz).map(k=>(
+            <button key={k} className={n===k?'on':''} onClick={()=>setN(k)}>{k}</button>
+          ))}</div></div>
+        <div className="sdiv"/>
+        <div className="sg"><span className="sglbl">Pieces</span>
+          <div className="seg">
+            <button className={!owned?'on':''} onClick={()=>setOwned(false)}>Neutral</button>
+            <button className={owned?'on':''} onClick={()=>setOwned(true)}>🔵🔴 Owned</button>
+          </div></div>
+        <div className="sdiv"/>
+        <div className="sg"><span className="sglbl">Mode</span>
+          <div className="seg">
+            <button className={mode==='vsAI'?'on':''} onClick={()=>setMode('vsAI')}>🤖 vs AI</button>
+            <button className={mode==='twoPlayer'?'on':''} onClick={()=>setMode('twoPlayer')}>👥 2 players</button>
+          </div></div>
+        {mode==='vsAI'&&<><div className="sdiv"/>
+          <div className="sg"><span className="sglbl">AI</span>
+            <div className="seg">{[['easy','Easy'],['medium','Med'],['hard','Hard'],['expert','Expert'],['impossible','∞']].map(([l,lb])=>(
+              <button key={l} className={lvl===l?'on':''} onClick={()=>setLvl(l)}>{lb}</button>
+            ))}</div></div></>}
+        <div className="sdiv"/>
+        <div className="sg"><span className="sglbl">View</span>
+          <div className="seg">
+            <button className={theme==='elements'?'on':''} onClick={()=>setTheme('elements')}>🔮</button>
+            <button className={theme==='colors'?'on':''} onClick={()=>setTheme('colors')}>🌈</button>
+          </div></div>
+        <div className="sg"><span className="sglbl">Hints</span>
+          <div className="seg">
+            <button className={hints?'on':''} onClick={()=>setHints(h=>!h)}>{hints?'✅':'⬜'}</button>
+          </div></div>
+        <button className="btn-new" onClick={handleReset}>🔄 New</button>
+      </div>
 
-          <div className="element-stats glass-panel">
-            <div className="section-label">Баланс стихій</div>
-            <div className="element-grid">
-              {ELEMENTS.slice(0, numElements).map((el, i) => (
-                <div key={el} className="el-stat-item" style={{ '--el-color': colors[i] }}>
-                  <span className="el-stat-icon">{el}</span>
-                  <div className="el-stat-bar-wrap">
-                    <div className="el-stat-bar" style={{ width: `${Math.min(100, elementCounts[i] * 10)}%`, background: colors[i] }} />
-                  </div>
-                  <span className="el-stat-count">{elementCounts[i]}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <MoveHistory history={moveHistory} />
-
-          <button
-            className={`undo-btn ${!canUndo ? 'disabled' : ''}`}
-            onClick={handleUndo}
-            disabled={!canUndo}
-          >
-            🔙 Відмінити хід
-          </button>
-        </div>
+      <div className="legend">
+        {owned&&<>
+          <div className="lgi"><div className="lgsw" style={{background:'var(--p1b)',border:'2px solid var(--p1e)'}}/><span>Your piece</span></div>
+          <div className="lgi"><div className="lgsw" style={{background:'var(--p2b)',border:'2px solid var(--p2e)'}}/><span>Opponent</span></div>
+        </>}
+        <div className="lgi"><span className="legend-ring ok"/><span>Valid move</span></div>
+        <div className="lgi"><span className="legend-ring win"/><span>Winning move</span></div>
       </div>
     </div>
   );
 }
-
-export default App;
