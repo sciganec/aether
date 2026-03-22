@@ -1,13 +1,13 @@
 {
   "files": {
-    "main.css": "/aether/static/css/main.a2b4f784.css",
-    "main.js": "/aether/static/js/main.9c432096.js",
+    "main.css": "/aether/static/css/main.9c5e9a12.css",
+    "main.js": "/aether/static/js/main.d29933fd.js",
     "index.html": "/aether/index.html",
-    "main.a2b4f784.css.map": "/aether/static/css/main.a2b4f784.css.map",
-    "main.9c432096.js.map": "/aether/static/js/main.9c432096.js.map"
+    "main.9c5e9a12.css.map": "/aether/static/css/main.9c5e9a12.css.map",
+    "main.d29933fd.js.map": "/aether/static/js/main.d29933fd.js.map"
   },
   "entrypoints": [
-    "static/css/main.a2b4f784.css",
-    "static/js/main.9c432096.js"
+    "static/css/main.9c5e9a12.css",
+    "static/js/main.d29933fd.js"
   ]
 }
