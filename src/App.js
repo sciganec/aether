@@ -349,6 +349,41 @@ function useTimer(){
   };
 }
 
+
+// ── useCellSize ───────────────────────────────────
+// Computes the largest cell size that fits the board on screen.
+// Accounts for: header, player strips, status bar, settings, legend,
+// padding, gap between cells — everything that takes vertical/horizontal space.
+function useCellSize(sz, owned){
+  const[cell,setCell]=useState(64);
+  useEffect(()=>{
+    function calc(){
+      const vw=window.innerWidth;
+      const vh=window.innerHeight;
+      // Estimate reserved vertical space (px): header+strips+statusbar+settings+legend+padding
+      const reservedV = owned
+        ? (40+42+42+38+42+36+60)  // header+2strips+sbar+settings+legend+padding+gaps
+        : (40+38+42+36+60);       // header+sbar+settings+legend+padding+gaps
+      const reservedH = vw < 700
+        ? 24                       // narrow: only padding
+        : 176+10+24;               // side panel + gap + padding
+      const availH = Math.max(vh - reservedV, 160);
+      const availW = Math.max(vw - reservedH, 160);
+      const gapTotal = (sz-1)*5;
+      const wrapPad  = Math.min(12, Math.floor(vw*0.012))*2;
+      const fromH = Math.floor((availH - wrapPad - gapTotal) / sz);
+      const fromW = Math.floor((availW - wrapPad - gapTotal) / sz);
+      const raw = Math.min(fromH, fromW);
+      // Clamp: min 36px (legible), max 96px (no need to be bigger)
+      setCell(Math.max(36, Math.min(96, raw)));
+    }
+    calc();
+    window.addEventListener('resize', calc);
+    return()=>window.removeEventListener('resize', calc);
+  },[sz, owned]);
+  return cell;
+}
+
 // ── PIECE ─────────────────────────────────────────
 const Piece=React.memo(({idx,own,theme,colors,owned})=>{
   if(!idx.length)return null;
@@ -363,12 +398,12 @@ const Piece=React.memo(({idx,own,theme,colors,owned})=>{
 });
 
 // ── BOARD ─────────────────────────────────────────
-const Board=React.memo(({board,theme,sel,validMoves,onClick,colors,wm,hints,cp,owned,lastMove,thr,ct})=>{
+const Board=React.memo(({board,theme,sel,validMoves,onClick,colors,wm,hints,cp,owned,lastMove,thr,ct,cellPx})=>{
   const sz=board.length,mid=Math.floor(sz/2);
   const wF=new Set(wm.map(m=>`${m.from[0]},${m.from[1]}`));
   const wT=new Set(wm.map(m=>`${m.to[0]},${m.to[1]}`));
   return(
-    <div className="bwrap">
+    <div className="bwrap" style={{'--cell':`${cellPx}px`,'--gap':`${Math.max(3,Math.round(cellPx*0.07))}px`}}>
       <div className="board" style={{gridTemplateColumns:`repeat(${sz},var(--cell))`,gridTemplateRows:`repeat(${sz},var(--cell))`}}>
         {board.map((row,r)=>row.map(({idx,own},c)=>{
           const key=`${r},${c}`;
@@ -572,6 +607,7 @@ export default function App(){
   const[showWin,    setShowWin   ]=useState(false);
 
   const colors=React.useMemo(()=>elc(n),[n]);
+  const cellPx=useCellSize(sz,owned);
 
   const{
     eng,engRef,board,cp,winner,wr,mc,nodes,canUndo,counts,wm,thr,ct,
@@ -737,7 +773,7 @@ export default function App(){
       <div className="game-row">
         <Board board={board} theme={theme} sel={sel} validMoves={validMoves}
           onClick={handleCellClick} colors={colors} wm={wm} thr={thr} ct={ct}
-          lastMove={lastMove} hints={hints} cp={cp} owned={owned}/>
+          lastMove={lastMove} hints={hints} cp={cp} owned={owned} cellPx={cellPx}/>
         <div className="side">
           <InfoCard selCell={sel} eng={eng} colors={colors} owned={owned}/>
           <MoveLog moveLog={moveLog} owned={owned}/>
