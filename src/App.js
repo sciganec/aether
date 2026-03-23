@@ -68,15 +68,78 @@ function mkNeutral(sz,n){
   for(let r=0;r<sz;r++)for(let c=0;c<sz;c++)b[r*sz+c]=1<<((r+c)%n);
   return{board:b,owner:new Uint8Array(sz*sz).fill(EMPTY)};
 }
-function mkOwned(sz,n){
+// layout: 'sym' symmetric, 'asym' asymmetric, 'rand' random, 'chaos' chaotic
+function mkOwned(sz,n,layout='sym'){
   const b=new Uint8Array(sz*sz),o=new Uint8Array(sz*sz).fill(EMPTY);
   const half=Math.floor(sz/2),mid=Math.floor(sz/2);
-  for(let r=0;r<sz;r++)for(let c=0;c<sz;c++){
-    const i=r*sz+c;
-    if(sz%2===1&&r===mid&&c===mid)continue;
-    if(r<half){b[i]=1<<(c%n);o[i]=1;}
-    else if(r>=sz-half){b[i]=1<<(c%n);o[i]=0;}
-    else if(sz%2===1&&r===mid){const el=Math.min(c,sz-1-c)%n;b[i]=1<<el;o[i]=(c<mid)?1:0;}
+
+  if(layout==='sym'){
+    // 5×4: mathematically optimal layout
+    // Criteria: 0 same-player knight conflicts, perfect 3×3×3×3 balance,
+    // all 4 elements around center diagonally, 0 orthogonal clustering
+    // Row0: F A F W E  Row1: E F A E W
+    // Row2: W A center F A
+    // Row3: E W E A F  Row4: W E W F A
+    const SPEC_5x4=[[0,3,0,1,2],[2,0,3,2,1],[1,3,-1,0,3],[2,1,2,3,0],[1,2,1,0,3]];
+    if(sz===5&&n===4){
+      for(let r=0;r<5;r++)for(let c=0;c<5;c++){
+        const i=r*5+c,el=SPEC_5x4[r][c];
+        if(el===-1)continue;
+        b[i]=1<<el;o[i]=(r<2||(r===2&&c<2))?1:0;
+      }
+    } else {
+      for(let r=0;r<sz;r++)for(let c=0;c<sz;c++){
+        const i=r*sz+c;
+        if(sz%2===1&&r===mid&&c===mid)continue;
+        if(r<half){b[i]=1<<(c%n);o[i]=1;}
+        else if(r>=sz-half){b[i]=1<<(c%n);o[i]=0;}
+        else if(sz%2===1&&r===mid){const el=Math.min(c,sz-1-c)%n;b[i]=1<<el;o[i]=(c<mid)?1:0;}
+      }
+    }
+  } else if(layout==='asym'){
+    // Asymmetric: same piece count but elements assigned differently per side
+    for(let r=0;r<sz;r++)for(let c=0;c<sz;c++){
+      const i=r*sz+c;
+      if(sz%2===1&&r===mid&&c===mid)continue;
+      if(r<half){b[i]=1<<((c*3+r)%n);o[i]=1;}           // AI: stripes at angle
+      else if(r>=sz-half){b[i]=1<<((c+r)%n);o[i]=0;}    // Human: diagonal
+      else if(sz%2===1&&r===mid){const el=(c*2)%n;b[i]=1<<el;o[i]=(c<mid)?1:0;}
+    }
+  } else if(layout==='rand'){
+    // Random: same piece count per player, random element assignment
+    const cells0=[],cells1=[];
+    for(let r=0;r<sz;r++)for(let c=0;c<sz;c++){
+      const i=r*sz+c;
+      if(sz%2===1&&r===mid&&c===mid)continue;
+      if(r<half)cells1.push(i);
+      else if(r>=sz-half)cells0.push(i);
+      else if(sz%2===1&&r===mid){(c<mid?cells1:cells0).push(i);}
+    }
+    cells0.forEach((i,k)=>{b[i]=1<<(k%n);o[i]=0;});
+    cells1.forEach((i,k)=>{b[i]=1<<(k%n);o[i]=1;});
+    // Shuffle elements randomly
+    for(let p=0;p<sz*sz;p++){
+      if(o[p]===EMPTY)continue;
+      const pool=o[p]===0?cells0:cells1;
+      const j=pool[Math.floor(Math.random()*pool.length)];
+      const tmp=b[p];b[p]=b[j];b[j]=tmp;
+    }
+  } else {
+    // chaos: pieces spread across entire board, no clear front lines
+    // Each player gets sz*half pieces scattered randomly across the whole board
+    const allCells=[];
+    for(let i=0;i<sz*sz;i++){
+      if(sz%2===1&&i===mid*sz+mid)continue;
+      allCells.push(i);
+    }
+    // Shuffle all cells
+    for(let i=allCells.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[allCells[i],allCells[j]]=[allCells[j],allCells[i]];}
+    const total=allCells.length,half2=Math.floor(total/2);
+    for(let k=0;k<total;k++){
+      const i=allCells[k];
+      o[i]=k<half2?0:1;
+      b[i]=1<<(Math.floor(Math.random()*n));
+    }
   }
   return{board:b,owner:o};
 }
@@ -115,8 +178,8 @@ const TIME_LIMIT_MS=600;
 
 // ── ENGINE ────────────────────────────────────────
 class Engine{
-  constructor(sz=5,n=5,owned=false){
-    this.sz=sz;this.n=n;this.owned=owned;
+  constructor(sz=5,n=5,owned=false,layout='sym'){
+    this.sz=sz;this.n=n;this.owned=owned;this.layout=layout;
     this.win=(1<<n)-1;this.tg=mkTargets(sz);
     this.board=new Uint8Array(sz*sz);this.owner=new Uint8Array(sz*sz).fill(EMPTY);
     this.hash=0n;this.cp=0;this.winner=null;this.wr=null;
@@ -250,7 +313,7 @@ class Engine{
     return best??ms[0];
   }
   reset(){
-    const{board,owner}=this.owned?mkOwned(this.sz,this.n):mkNeutral(this.sz,this.n);
+    const{board,owner}=this.owned?mkOwned(this.sz,this.n,this.layout):mkNeutral(this.sz,this.n);
     this.board=board;this.owner=owner;this.hash=0n;
     for(let r=0;r<this.sz;r++)for(let c=0;c<this.sz;c++)this._xor(r,c);
     this.winner=null;this.wr=null;this.mc=0;this.cp=0;this.hist=[];this.tt.clear();
@@ -282,11 +345,11 @@ function spawnConfetti(){
 }
 
 // ── useEngine ─────────────────────────────────────
-function useEngine(sz,n,owned){
+function useEngine(sz,n,owned,layout){
   // Engine lives in a ref — never recreated by React renders
   const engRef=useRef(null);
-  if(!engRef.current||engRef.current.sz!==sz||engRef.current.n!==n||engRef.current.owned!==owned){
-    engRef.current=new Engine(sz,n,owned);
+  if(!engRef.current||engRef.current.sz!==sz||engRef.current.n!==n||engRef.current.owned!==owned||engRef.current.layout!==layout){
+    engRef.current=new Engine(sz,n,owned,layout);
   }
 
   const[tick,setTick]=useState(0);
@@ -589,9 +652,613 @@ const Guide=React.memo(({onClose})=>(
 ));
 
 // ── MAIN APP ──────────────────────────────────────
-export default function App(){
+
+// ══════════════════════════════════════════════════════════════════
+//  AETHER ✨  —  5×5 owned elemental strategy (integrated mode)
+//
+//  Rules:
+//  • Each player: 3 pieces × 4 elements = 12 pieces
+//  • Board: 5×5 torus. Center (2,2) = Aether cell (empty start)
+//  • Movement: 1 or 3 elements → knight; 2 or 4 elements → bishop-1
+//  • Only your own pieces move. Landing on enemy = capture (merge+annihilate)
+//  • Annihilation: duplicate elements cancel on merge
+//  • Illegal if annihilation destroys last global copy of any element
+//  • Win: 4-element piece enters center (Aether), OR destroy all enemy pieces
+//
+//  Layout (validated: 0 same-player same-element knight conflicts):
+//  F=fire🔥 W=water💧 E=earth🌍 A=air🌪
+//    A  E  A  A  E   (P1/red top)
+//    F  F  W  W  W
+//    F  E  ✨  W  A   (center row)
+//    F  E  F  E  A   (P0/blue bottom)
+//    W  F  E  W  A
+// ══════════════════════════════════════════════════════════════════
+
+const AP_EL    = ['🔥','💧','🌍','🌪'];
+const AP_EN    = ['Fire','Water','Earth','Air'];
+const AP_CENTER= 12; // cell (2,2)
+const AP_EMPTY = 255;
+const AP_PC    = ['#4f8ef7','#f05252'];
+const AP_KN    = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+const AP_B1    = [[-1,-1],[-1,1],[1,-1],[1,1]];
+
+// PIECE: Set of element indices (0-3). Max 4 unique elements.
+// Merge: union, then cancel any element present in BOTH pieces (annihilation).
+// Move type: 1 or 3 elements → knight; 2 or 4 elements → bishop-1.
+// Win: piece with all 4 elements {0,1,2,3} enters center.
+
+const AP_LAYOUT = [
+  [0,3,0,1,2],  // row 0  P1/red:  F A F W E
+  [2,0,3,2,1],  // row 1  P1/red:  E F A E W
+  [1,3,-1,0,3], // row 2  mixed:   W A ✨ F A
+  [2,1,2,3,0],  // row 3  P0/blue: E W E A F
+  [1,2,1,0,3],  // row 4  P0/blue: W E W F A
+];
+
+function apOwner(r,c){
+  if(r===2&&c===2)return AP_EMPTY;
+  if(r<2||(r===2&&c<2))return 1;
+  return 0;
+}
+
+function mkAPBoard(){
+  return Array.from({length:25},(_,i)=>{
+    const r=Math.floor(i/5),c=i%5,el=AP_LAYOUT[r][c];
+    return{elems:el===-1?new Set():new Set([el]),owner:apOwner(r,c)};
+  });
+}
+
+function apMoveType(elems){
+  const n=elems.size;
+  if(n===1||n===3)return'knight';
+  if(n===2||n===4)return'bishop1';
+  return null;
+}
+
+function apGetTargets(i,board,player){
+  const cell=board[i];
+  if(!cell.elems.size||cell.owner!==player)return[];
+  const r=Math.floor(i/5),c=i%5,w=v=>(v+5)%5;
+  const mt=apMoveType(cell.elems);
+  if(!mt)return[];
+  return(mt==='knight'?AP_KN:AP_B1)
+    .map(([dr,dc])=>w(r+dr)*5+w(c+dc))
+    .filter(ti=>!(ti===AP_CENTER&&cell.elems.size!==4));
+}
+
+// Merge: pure union — 1+1=1 (Set semantics, no annihilation)
+// 🔥+🔥=🔥  🔥+💧=🔥💧  🔥💧+🔥🌍=🔥💧🌍
+function apMergeElems(e1,e2){
+  return{result:new Set([...e1,...e2]),annihilated:new Set()};
+}
+
+function apIsLegal(board,from,to,player){
+  const src=board[from],dst=board[to];
+  if(!src.elems.size||src.owner!==player)return false;
+  return apGetTargets(from,board,player).includes(to);
+}
+
+// ── AETHER ENGINE ─────────────────────────────────────────────────
+class APEngine{
+  constructor(){
+    this.board=mkAPBoard();
+    this.cp=0;this.winner=null;this.wr=null;this.mc=0;this.hist=[];this.nodes=0;
+  }
+  snap(){
+    return{
+      board:this.board.map(c=>({elems:new Set(c.elems),owner:c.owner})),
+      cp:this.cp,winner:this.winner,wr:this.wr,mc:this.mc,
+    };
+  }
+  load(s){
+    this.board=s.board.map(c=>({elems:new Set(c.elems),owner:c.owner}));
+    this.cp=s.cp;this.winner=s.winner;this.wr=s.wr;this.mc=s.mc;
+  }
+  moves(){
+    const ms=[];
+    for(let i=0;i<25;i++){
+      const c=this.board[i];
+      if(!c.elems.size||c.owner!==this.cp)continue;
+      for(const t of apGetTargets(i,this.board,this.cp))
+        if(apIsLegal(this.board,i,t,this.cp))ms.push({from:i,to:t});
+    }
+    return ms;
+  }
+  counts(){
+    let a=0,b=0;
+    for(const c of this.board){if(c.owner===0)a++;else if(c.owner===1)b++;}
+    return[a,b];
+  }
+  move(from,to){
+    if(this.winner!=null)return{won:false};
+    if(!apIsLegal(this.board,from,to,this.cp))return{won:false,illegal:true};
+    const player=this.cp;
+    this.hist.push(this.snap());
+    const src=this.board[from],dst=this.board[to];
+    const wasEnemy=dst.owner===1-player&&dst.elems.size>0;
+    // Only win: 4-element piece enters center
+    if(to===AP_CENTER&&src.elems.size===4){
+      dst.elems=new Set(src.elems);dst.owner=player;
+      src.elems=new Set();src.owner=AP_EMPTY;
+      this.winner=player;this.wr='aether';this.mc++;
+      return{won:true,reason:'aether',player};
+    }
+    const{result,annihilated}=apMergeElems(src.elems,dst.elems);
+    src.elems=new Set();src.owner=AP_EMPTY;
+    dst.elems=result;dst.owner=result.size>0?player:AP_EMPTY;
+    this.mc++;this.cp=1-this.cp;
+    return{won:false,annihilated,wasEnemy};
+  }
+  eval(){
+    if(this.winner!=null)return this.winner===this.cp?9000000:-9000000;
+    const cp=this.cp,sc=this.counts();
+    let s=(cp===0?sc[0]-sc[1]:sc[1]-sc[0])*80;
+    for(let i=0;i<25;i++){
+      const c=this.board[i];if(!c.elems.size)continue;
+      const n=c.elems.size,sign=c.owner===cp?1:-1;
+      s+=sign*n*60;
+      if(n===4){const r=Math.floor(i/5),col=i%5,d=Math.abs(r-2)+Math.abs(col-2);s+=sign*(5-d)*600;}
+      s+=sign*apGetTargets(i,this.board,c.owner).length*5;
+    }
+    return s;
+  }
+  minimax(d,a,b,mx,lim,nl){
+    this.nodes++;
+    if(this.winner!=null)return mx?-9000000:9000000;
+    if(!d||Date.now()>lim||this.nodes>nl)return this.eval();
+    const ms=this.moves();if(!ms.length)return this.eval();
+    ms.sort((x,y)=>{
+      const v=m=>{
+        const sf=this.board[m.from],dt=this.board[m.to];
+        return(m.to===AP_CENTER&&sf.elems.size===4?2000000:0)
+          +(sf.elems.size===4?200000:0)
+          +(dt.owner===1-this.cp&&dt.elems.size?40000:0)
+          +sf.elems.size*200+dt.elems.size*100;
+      };
+      return v(y)-v(x);
+    });
+    let best=mx?-Infinity:Infinity;
+    for(const m of ms){
+      if(Date.now()>lim||this.nodes>nl)break;
+      const snap=this.snap();this.move(m.from,m.to);
+      const v=this.minimax(d-1,a,b,!mx,lim,nl);this.load(snap);
+      if(mx){best=Math.max(best,v);a=Math.max(a,best);}
+      else{best=Math.min(best,v);b=Math.min(b,best);}
+      if(a>=b)break;
+    }
+    return best;
+  }
+  aiMove(lvl){
+    const D={easy:1,medium:2,hard:3,expert:4};
+    const depth=D[lvl]||2,lim=Date.now()+700,nl=25000;
+    this.nodes=0;
+    const ms=this.moves();if(!ms.length)return null;
+    for(const m of ms)if(m.to===AP_CENTER&&this.board[m.from].elems.size===4)return m;
+    let best=null,bs=-Infinity;
+    for(const m of ms){
+      if(Date.now()>lim||this.nodes>nl)break;
+      const snap=this.snap();this.move(m.from,m.to);
+      const v=this.minimax(depth-1,-Infinity,Infinity,false,lim,nl);this.load(snap);
+      if(v>bs){bs=v;best=m;}
+    }
+    return best??ms[0];
+  }
+  reset(){
+    this.board=mkAPBoard();
+    this.cp=0;this.winner=null;this.wr=null;this.mc=0;this.hist=[];
+  }
+}
+
+
+// ── AETHER CELL ───────────────────────────────────────────────────
+const APCell=React.memo(({idx,cell,isSel,isTarget,isLast,isCenter,onClick,cellPx})=>{
+  const{elems,owner}=cell;
+  const isEmpty=elems.length===0;
+  const mt=isEmpty?null:apMoveType(new Set(elems));
+  const isAether=elems.length===4;
+
+  let cls='ap-cell';
+  if(isCenter&&isEmpty)cls+=' ap-center';else if(isEmpty)cls+=' ap-mt';
+  if(isSel)cls+=' ap-sel';
+  if(isTarget)cls+=' ap-target';
+  if(isLast&&!isSel)cls+=' ap-last';
+  if(!isEmpty&&owner===0)cls+=' ap-own0';
+  if(!isEmpty&&owner===1)cls+=' ap-own1';
+  if(isAether)cls+=' ap-aether-ready';
+
+  const fsScale=elems.length<=2?'.38':'.26';
+  const fsMax=elems.length<=2?1.4:.9;
+  return(
+    <div className={cls} style={{width:cellPx,height:cellPx}} onClick={()=>onClick(idx)}>
+      {isTarget&&<div className="ap-ring"/>}
+      {!isEmpty?(
+        <div className="ap-piece">
+          <div className={`ap-pbg ${owner===0?'ap-p0':owner===1?'ap-p1':''}`}/>
+          <div className={`ap-elems c${elems.length}`}>
+            {elems.map((e,k)=>(
+              <span key={k} className="ap-el"
+                style={{fontSize:`clamp(.52rem,calc(${cellPx}px*${fsScale}),${fsMax}rem)`}}>
+                {AP_EL[e]}
+              </span>
+            ))}
+          </div>
+          {mt&&<div className="ap-mt-badge">{mt==='knight'?'♞':'⬡'}</div>}
+        </div>
+      ):(isCenter&&(
+        <div className="ap-center-icon">✨<div className="ap-center-lbl">AETHER</div></div>
+      ))}
+    </div>
+  );
+});
+
+// ── AETHER PLAYER STRIP ───────────────────────────────────────────
+const APPlayerStrip=React.memo(({p,label,active,count,board})=>{
+  const elemCnt=[0,0,0,0];
+  board.forEach(c=>{if(c.owner===p)c.elems.forEach(e=>elemCnt[e]++);});
+  return(
+    <div className={`pstrip p${p}${active?' active':''}`}>
+      <div className="ps-av">{p===0?'You':'AI'}</div>
+      <div className="ps-info">
+        <div className="ps-name">{label}</div>
+        <div className={`ps-st${active?' on':''}`}>{active?'YOUR TURN ▶':'waiting'}</div>
+      </div>
+      <div className="ps-els">
+        {AP_EL.map((el,e)=>(
+          <div key={e} className={`eldot ${elemCnt[e]>0?'have':'miss'}`} title={AP_EN[e]}>
+            {el}{elemCnt[e]>1&&<sup style={{fontSize:'.55em',lineHeight:0}}>{elemCnt[e]}</sup>}
+          </div>
+        ))}
+      </div>
+      <div className="ps-cnt">
+        <div className="ps-num">{count}</div>
+        <div className="ps-bw"><div className="ps-bf" style={{width:`${Math.min(100,count/12*100)}%`}}/></div>
+      </div>
+    </div>
+  );
+});
+
+// ── AETHER WIN SCREEN ─────────────────────────────────────────────
+const APWinScreen=React.memo(({winner,wr,mc,elapsed,mode,onRematch})=>{
+  const title=winner===0?(mode==='vsAI'?'You won!':'Player 1 wins!'):(mode==='vsAI'?'AI wins!':'Player 2 wins!');
+  return(
+    <div className="win-mask"><div className="win-box">
+      <div className="wico">✨</div>
+      <div className="wttl" style={{color:AP_PC[winner]}}>{title}</div>
+      <div className="wrsn">✨ Aether claimed — all 4 elements in the center!</div>
+      <div className="wstats">
+        <div className="wstat"><span>Moves</span><strong>{mc}</strong></div>
+        <div className="wstat"><span>Time</span><strong>{fmtT(elapsed)}</strong></div>
+      </div>
+      <button className="btn-rm" onClick={onRematch}>🔄 Play again</button>
+    </div></div>
+  );
+});
+
+// ── AETHER GUIDE ──────────────────────────────────────────────────
+const APGuide=React.memo(({onClose})=>(
+  <div className="win-mask" onClick={onClose}>
+    <div className="guide-box" onClick={e=>e.stopPropagation()}>
+      <button className="guide-close" onClick={onClose}>✕</button>
+      <h2 className="guide-title">AETHER ✨ Rules</h2>
+      <div className="guide-section"><h3>🗺️ Board</h3>
+        <p>5×5 torus — all edges wrap. Center (2,2) = <strong>✨ Aether</strong>, empty at start. Blue pieces (yours) start at the bottom, red (AI) at the top.</p></div>
+      <div className="guide-section"><h3>♟️ Movement</h3>
+        <ul>
+          <li><strong>1 or 3 elements</strong> → Knight move (L-shape)</li>
+          <li><strong>2 or 4 elements</strong> → Bishop×1 (one diagonal step)</li>
+          <li>Center only accepts a piece with all <strong>4 elements</strong></li>
+        </ul></div>
+      <div className="guide-section"><h3>⚗️ Merge &amp; Annihilation</h3>
+        <p>Landing on any piece merges them — identical elements become one: 🔥+🔥=🔥. Example: 🔥💧 + 🔥🌍 &rarr; 🔥💧🌍.</p>
+        <p>Goal: build a piece with all 4 elements (🔥💧🌍🌪) and move it into the ✨ center.</p></div>
+      <div className="guide-section"><h3>🏆 Winning</h3>
+        <p>Build a piece with exactly <strong>one of each element</strong> (🔥💧🌍🌪) and move it into the <strong>✨ center</strong>. The piece must move diagonally (bishop&times;1) &mdash; guard your path!</p></div>
+      <div className="guide-section"><h3>💡 Tips</h3>
+        <p>Build toward 4 elements by merging carefully — but a 4-element piece moves diagonally (slow!). Guard your path to the center. Use annihilation offensively to weaken enemies, but watch the global element rule.</p></div>
+    </div>
+  </div>
+));
+
+// ── AETHER GAME ───────────────────────────────────────────────────
+function AetherGame({onBack}){
+  const containerRef=useRef(null);
+  const stateRef=useRef({
+    eng:new APEngine(),
+    sel:null,
+    tgts:[],
+    last:null,
+    aiTimer:null,
+    aiRunning:false,
+    showWin:false,
+    guide:false,
+    mode:'vsAI',
+    lvl:'medium',
+    timerSec:0,
+    timerBase:Date.now(),
+    timerActive:true,
+  });
+  const[,forceRender]=useState(0);
+  const bump=useCallback(()=>forceRender(n=>n+1),[]);
+  const S=stateRef.current;
+
+  // Timer
+  useEffect(()=>{
+    const iv=setInterval(()=>{
+      if(!S.timerActive)return;
+      const t=Math.floor((Date.now()-S.timerBase)/1000);
+      if(t!==S.timerSec){S.timerSec=t;bump();}
+    },500);
+    return()=>clearInterval(iv);
+  },[]);// eslint-disable-line
+
+  // Cell size
+  const[cellPx,setCellPx]=useState(80);
+  useEffect(()=>{
+    const calc=()=>{
+      const vw=window.innerWidth,vh=window.innerHeight,narrow=vw<700;
+      setCellPx(Math.max(48,Math.min(110,Math.min(
+        Math.floor((Math.max(vh-(narrow?400:330),200)-40)/5),
+        Math.floor((Math.max(vw-(narrow?20:210),200)-40)/5)
+      ))));
+    };
+    calc();
+    window.addEventListener('resize',calc);
+    return()=>window.removeEventListener('resize',calc);
+  },[]);
+
+  const E=S.eng;
+
+  const doReset=()=>{
+    if(S.aiTimer){clearTimeout(S.aiTimer);S.aiTimer=null;}
+    S.aiRunning=false;S.showWin=false;S.sel=null;S.tgts=[];S.last=null;
+    S.timerSec=0;S.timerBase=Date.now();S.timerActive=true;
+    E.reset();bump();
+  };
+
+  const triggerAI=()=>{
+    if(S.mode!=='vsAI'||E.cp!==1||E.winner!=null||S.aiTimer)return;
+    S.aiRunning=true;bump();
+    S.aiTimer=setTimeout(()=>{
+      S.aiTimer=null;
+      if(E.winner!=null||E.cp!==1){S.aiRunning=false;bump();return;}
+      const m=E.aiMove(S.lvl);
+      if(m){
+        E.move(m.from,m.to);
+        S.last=m;
+      }
+      S.aiRunning=false;
+      // check win
+      if(E.winner!=null&&!S.showWin){
+        S.timerActive=false;
+        sfx.win();
+        setTimeout(()=>{S.showWin=true;bump();spawnConfetti();},350);
+      }
+      bump();
+    },S.lvl==='easy'?400:900);
+  };
+
+  const handleCell=(idx)=>{
+    if(E.winner!=null||S.aiRunning)return;
+    if(S.mode==='vsAI'&&E.cp===1)return;
+    const cell=E.board[idx];
+    const isMine=cell.elems.size>0&&cell.owner===E.cp;
+    const isTarget=S.tgts.includes(idx);
+    if(S.sel===null){
+      if(!isMine)return;
+      sfx.select();
+      S.sel=idx;
+      S.tgts=apGetTargets(idx,E.board,E.cp);
+      bump();
+      return;
+    }
+    if(idx===S.sel){S.sel=null;S.tgts=[];bump();return;}
+    if(isTarget){
+      const fromIdx=S.sel;
+      const res=E.move(fromIdx,idx);
+      S.sel=null;S.tgts=[];S.last={from:fromIdx,to:idx};
+      if(res.annihilated?.size>0)sfx.merge();
+      else if(res.wasEnemy)sfx.capture();
+      else sfx.move();
+      if(E.winner!=null&&!S.showWin){
+        S.timerActive=false;
+        sfx.win();
+        setTimeout(()=>{S.showWin=true;bump();spawnConfetti();},350);
+      }
+      bump();
+      if(!res.won)triggerAI();
+      return;
+    }
+    if(isMine){
+      sfx.select();
+      S.sel=idx;
+      S.tgts=apGetTargets(idx,E.board,E.cp);
+      bump();
+      return;
+    }
+    S.sel=null;S.tgts=[];bump();
+  };
+
+  const doUndo=()=>{
+    if(!E.hist.length)return;
+    E.load(E.hist.pop());sfx.undo();
+    if(S.mode==='vsAI'&&E.hist.length>0&&E.cp===1)E.load(E.hist.pop());
+    S.sel=null;S.tgts=[];S.last=null;bump();
+  };
+
+  // Snapshot for render
+  const board=E.board.map(c=>({elems:[...c.elems],owner:c.owner}));
+  const counts=E.counts();
+  const{winner,wr,mc,cp}=E;
+
+  let stTxt,stCol;
+  if(winner!=null){
+    stTxt=`✨ ${winner===0?(S.mode==='vsAI'?'You won!':'P1 wins!'):(S.mode==='vsAI'?'AI wins!':'P2 wins!')}`;
+    stCol='var(--gold)';
+  }else if(S.aiRunning){stTxt='🤖 Thinking...';stCol=AP_PC[1];}
+  else{stTxt=cp===0?'● Your turn':(S.mode==='vsAI'?`● AI's turn`:"● P2's turn");stCol=AP_PC[cp];}
+
+  return(
+    <div className="app" ref={containerRef}>
+      {S.guide&&<APGuide onClose={()=>{S.guide=false;bump();}}/>}
+      {S.showWin&&winner!=null&&(
+        <APWinScreen winner={winner} wr={wr} mc={mc} elapsed={S.timerSec}
+          mode={S.mode} onRematch={doReset}/>
+      )}
+      <header className="hdr">
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          {onBack&&<button className="btn-help" onClick={onBack}>←</button>}
+          <div className="htitle">AETHER<em style={{color:'var(--gold)',fontStyle:'normal'}}> ✨</em></div>
+        </div>
+        <div className="hbadges">
+          <div className="badge timer">{fmtT(S.timerSec)}</div>
+          <div className="badge">Move {mc+1}</div>
+          <button className="btn-help" onClick={()=>{S.guide=true;bump();}}>?</button>
+        </div>
+      </header>
+
+      <APPlayerStrip p={1}
+        label={S.mode==='vsAI'?'Opponent (AI)':'Player 2'}
+        active={cp===1&&winner==null&&!S.aiRunning}
+        count={counts[1]} board={board}/>
+
+      <div className={`sbar${winner!=null?' won':''}`} style={{'--sc':stCol}}>
+        <span className={S.aiRunning?'thinking':''} style={{color:stCol}}>{stTxt}</span>
+        <div className="sbar-r">
+          {winner==null&&<span className="hbadge">🔵{counts[0]} · 🔴{counts[1]}</span>}
+        </div>
+      </div>
+
+      <div className="game-row">
+        <div className="bwrap" style={{padding:8}}>
+          <div style={{
+            display:'grid',
+            gridTemplateColumns:`repeat(5,${cellPx}px)`,
+            gridTemplateRows:`repeat(5,${cellPx}px)`,
+            gap:4,
+          }}>
+            {board.map((cell,i)=>(
+              <APCell key={i} idx={i} cell={cell}
+                isCenter={i===AP_CENTER}
+                isSel={S.sel===i}
+                isTarget={S.tgts.includes(i)}
+                isLast={S.last!=null&&(S.last.from===i||S.last.to===i)}
+                onClick={handleCell}
+                cellPx={cellPx}/>
+            ))}
+          </div>
+        </div>
+
+        <div className="side">
+          <div className="panel">
+            <div className="slbl">Movement</div>
+            <div style={{fontSize:'.72rem',color:'var(--txt2)',lineHeight:1.8}}>
+              <div>1 or 3 elems → <strong>♞</strong> Knight</div>
+              <div>2 or 4 elems → <strong>⬡</strong> Diagonal×1</div>
+              <div style={{color:'var(--gold)',marginTop:3}}>4 elems → enter ✨ center!</div>
+            </div>
+          </div>
+          <div className="panel">
+            <div className="slbl">Win by</div>
+            <div style={{fontSize:'.72rem',color:'var(--txt2)',lineHeight:1.8}}>
+              <div>✨ Move 4-elem piece to center</div>
+            </div>
+          </div>
+          <button className="undo" onClick={doUndo} disabled={!E.hist.length}>
+            ↩ Undo{E.hist.length?` (${E.hist.length})`:''}
+          </button>
+        </div>
+      </div>
+
+      <APPlayerStrip p={0}
+        label={S.mode==='vsAI'?'You':'Player 1'}
+        active={cp===0&&winner==null&&!S.aiRunning}
+        count={counts[0]} board={board}/>
+
+      <div className="settings">
+        <div className="sg"><span className="sglbl">Mode</span>
+          <div className="seg">
+            <button className={S.mode==='vsAI'?'on':''}
+              onClick={()=>{S.mode='vsAI';S.sel=null;S.tgts=[];E.reset();bump();}}>
+              🤖 vs AI
+            </button>
+            <button className={S.mode==='twoPlayer'?'on':''}
+              onClick={()=>{S.mode='twoPlayer';S.sel=null;S.tgts=[];E.reset();bump();}}>
+              👥 2P
+            </button>
+          </div>
+        </div>
+        {S.mode==='vsAI'&&<>
+          <div className="sdiv"/>
+          <div className="sg"><span className="sglbl">AI</span>
+            <div className="seg">
+              {[['easy','Easy'],['medium','Med'],['hard','Hard'],['expert','Expert']].map(([l,lb])=>(
+                <button key={l} className={S.lvl===l?'on':''}
+                  onClick={()=>{S.lvl=l;bump();}}>{lb}
+                </button>
+              ))}
+            </div>
+          </div>
+        </>}
+        <button className="btn-new" onClick={doReset}>🔄 New</button>
+      </div>
+
+      <div className="legend">
+        {AP_EL.map((el,i)=>(
+          <div key={i} className="lgi">
+            <span style={{fontSize:'.85rem'}}>{el}</span>
+            <span>{AP_EN[i]}</span>
+          </div>
+        ))}
+        <div className="lgi"><div className="lring"/><span>Valid move</span></div>
+        <div className="lgi"><span>✨</span><span>Enter with 4 elems = WIN</span></div>
+      </div>
+    </div>
+  );
+}
+
+
+// ── MODE PICKER ───────────────────────────────────────────────────
+function ModePicker({onSelect}){
+  return(
+    <div className="app">
+      <header className="hdr">
+        <div className="htitle">AETHER <em>ULTIMATE</em></div>
+      </header>
+      <div className="mode-picker">
+        <div>
+          <div className="mode-picker-title">Choose Mode</div>
+        </div>
+        <button className="mode-btn" onClick={()=>onSelect('classic')}>
+          <div className="mode-btn-title">AETHER <em>ULTIMATE</em></div>
+          <div className="mode-btn-desc">
+            Knight-move puzzle — collect all elements in one piece.<br/>
+            Neutral or Owned pieces · 3×3 to 8×8 · vs AI or 2 players
+          </div>
+        </button>
+        <button className="mode-btn" onClick={()=>onSelect('plus')} style={{borderColor:'rgba(251,191,36,.35)'}}>
+          <div className="mode-btn-title">AETHER <em>✨</em></div>
+          <div className="mode-btn-desc">
+            4 elements × 3 pieces · 5×5 torus · owned pieces · annihilation<br/>
+            Race to collect all 4 elements and claim the ✨ Aether center
+          </div>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── ROOT ──────────────────────────────────────────────────────────
+// Starts in classic mode. ✨ button in header opens AETHER+.
+export default function Root(){
+  const[gameMode,setGameMode]=useState('classic');
+  if(gameMode==='plus')return<AetherGame onBack={()=>setGameMode('classic')}/>;
+  return<App onAether={()=>setGameMode('plus')}/>;
+}
+
+function App({onBack,onAether}){
   const[sz,    setSzRaw]=useState(5);
-  const[n,     setN    ]=useState(5);
+  const[n,     setN    ]=useState(5);  // default 5 elements
+  const[layout,setLayout]=useState('sym');  // owned layout
   const[theme, setTheme]=useState('elements');
   const[mode,  setMode ]=useState('vsAI');
   const[lvl,   setLvl  ]=useState('medium');
@@ -612,7 +1279,7 @@ export default function App(){
   const{
     eng,engRef,board,cp,winner,wr,mc,nodes,canUndo,counts,wm,thr,ct,
     doMove,reset,undo,getAI,
-  }=useEngine(sz,n,owned);
+  }=useEngine(sz,n,owned,layout);
 
   // Single ref for pending AI timeout — cancel on reset
   const aiTimer=useRef(null);
@@ -656,11 +1323,16 @@ export default function App(){
   // reset and clearSel are stable useCallbacks; timer.reset is stable too
   },[reset,clearSel,timer.reset]);// eslint-disable-line
 
-  // Reset when owned mode switches
+  // Reset when owned mode or layout switches
   const prevOwned=useRef(owned);
+  const prevLayout=useRef(layout);
   useEffect(()=>{
-    if(prevOwned.current!==owned){prevOwned.current=owned;handleReset()}
-  },[owned]);// eslint-disable-line
+    const ownerChanged=prevOwned.current!==owned;
+    const layoutChanged=prevLayout.current!==layout;
+    prevOwned.current=owned;
+    prevLayout.current=layout;
+    if(ownerChanged||layoutChanged)handleReset();
+  },[owned,layout]);// eslint-disable-line
 
   // ── execMove ───────────────────────────────────────────────────────────────
   const execMove=useCallback((fr,fc,tr,tc,player)=>{
@@ -721,11 +1393,17 @@ export default function App(){
   // ── handleUndo ─────────────────────────────────────────────────────────────
   const handleUndo=useCallback(()=>{
     if(!canUndo)return;
-    undo();
-    if(mode==='vsAI'&&eng.hist.length>0&&eng.cp===1)undo();
+    undo(); // always undo at least 1 move
+    // In vsAI mode, also undo the AI's preceding move so human can re-try
+    if(mode==='vsAI'&&engRef.current.hist.length>0&&engRef.current.cp===1)undo();
     clearSel();setLastMove(null);
-    setMoveLog(prev=>{const a=[...prev];a.pop();if(mode==='vsAI'&&a.length)a.pop();return a});
-  },[canUndo,undo,mode,eng,clearSel]);
+    setMoveLog(prev=>{
+      const a=[...prev];
+      if(a.length)a.pop();
+      if(mode==='vsAI'&&a.length)a.pop();
+      return a;
+    });
+  },[canUndo,undo,mode,engRef,clearSel]);
 
   const setSz=useCallback((v)=>{setSzRaw(v);setN(prev=>Math.min(prev,v))},[]);
 
@@ -750,10 +1428,14 @@ export default function App(){
       )}
 
       <header className="hdr">
-        <div className="htitle">AETHER <em>ULTIMATE</em></div>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          {onBack&&<button className="btn-help" onClick={onBack} title="Menu">←</button>}
+          <div className="htitle">AETHER <em>ULTIMATE</em></div>
+        </div>
         <div className="hbadges">
           <div className="badge timer">{timer.fmt}</div>
           <div className="badge">Move {mc+1}</div>
+          {onAether&&<button className="btn-help" onClick={onAether} title="AETHER+ mode" style={{background:'rgba(251,191,36,.12)',borderColor:'rgba(251,191,36,.35)',color:'var(--gold)'}}>✨</button>}
           <button className="btn-help" onClick={()=>setGuide(true)}>?</button>
         </div>
       </header>
@@ -777,7 +1459,7 @@ export default function App(){
         <div className="side">
           <InfoCard selCell={sel} eng={eng} colors={colors} owned={owned}/>
           <MoveLog moveLog={moveLog} owned={owned}/>
-          <button className="undo" onClick={handleUndo} disabled={!canUndo}>↩ Undo</button>
+          <button className="undo" onClick={handleUndo} disabled={!canUndo}>↩ Undo{canUndo?` (${eng.hist.length})`:'' }</button>
         </div>
       </div>
 
@@ -801,6 +1483,13 @@ export default function App(){
             <button className={!owned?'on':''} onClick={()=>setOwned(false)}>Neutral</button>
             <button className={owned?'on':''} onClick={()=>setOwned(true)}>🔵🔴 Owned</button>
           </div></div>
+        {owned&&<><div className="sdiv"/>
+          <div className="sg"><span className="sglbl">Layout</span>
+            <div className="seg">
+              {[['sym','⇌ Sym'],['asym','↯ Asym'],['rand','🎲 Rand'],['chaos','🌀 Chaos']].map(([v,lb])=>(
+                <button key={v} className={layout===v?'on':''} onClick={()=>setLayout(v)}>{lb}</button>
+              ))}
+            </div></div></>}
         <div className="sdiv"/>
         <div className="sg"><span className="sglbl">Mode</span>
           <div className="seg">
